@@ -31,35 +31,50 @@ va a usar es solo copiar la carpeta y doble clic en `Recibos.exe`.
 y abrir con `Recibos.bat`. No hace falta nada más: el programa usa solo lo que
 viene incluido con Python.
 
-Para extraer los RAR desde el programa hace falta tener **WinRAR** o **7-Zip**
-instalado. Si no está ninguno, se extrae el RAR a mano (clic derecho > Extraer
-aquí) y listo, el programa igual funciona.
+Para que el programa abra los RAR solo, la computadora tiene que tener
+**WinRAR** o **7-Zip**. Si no está ninguno, se abre el RAR a mano (clic derecho
+> Extraer aquí) dentro de la misma carpeta y el programa igual funciona.
 
 ## Cómo se usa
 
-1. Doble clic en **`Recibos.bat`** para abrir el programa.
-2. **Carpeta con los recibos**: dar a *Importar RAR...* y elegir el RAR que se
-   descargó, o dar a *Elegir carpeta...* si ya se extrajo a mano. Esa carpeta
-   queda guardada; la próxima vez solo se mete el RAR nuevo.
-3. **Correo de quien envía**: dar a *Iniciar sesión con Gmail*, elegir la
-   cuenta en el navegador y aceptar. Queda conectado; arriba dice
-   *Conectado como ...*. Si el correo no es Gmail, usar la parte de abajo con
-   la [contraseña de aplicación](#contraseña-de-aplicación).
-4. **Trabajadores**: cargar la lista una sola vez, con *Agregar* o con
-   *Abrir lista en Excel* para pegar muchos de golpe. Queda guardada.
-5. La columna **Recibo** dice quién tiene su PDF (`listo`) y quién no
-   (`sin recibo`, en rojo). Si una persona tiene varios PDF en la carpeta
-   (por ejemplo del mes pasado), sale `listo (+1 viejos)` y se usa solo el
-   más nuevo, según la fecha del archivo.
-6. Marcar con un clic en la primera columna, o dar a *Marcar todos* /
-   *Solo los que tienen recibo*.
-7. **Enviar correos a los marcados**. En el *Registro* de abajo se ve cuál
-   salió bien y cuál falló. Ese registro también queda en `envios.log`.
-8. **Imprimir los marcados** manda los PDF a la impresora que Windows tenga
-   puesta por defecto.
+La ventana tiene solo lo necesario: la carpeta a la izquierda, la lista de
+personas en el medio, y los botones **Enviar** e **Imprimir** a la derecha. Lo
+demás está en **⚙ Configuración**.
 
-El asunto y el mensaje se pueden cambiar. Si se escribe `{nombre}` o
-`{cedula}`, el programa los reemplaza por los de cada persona.
+**Una sola vez:**
+
+1. Abrir `Recibos.exe` (o `Recibos.bat` si se usa con Python).
+2. **Elegir carpeta**: la carpeta donde se van a meter los RAR cada mes.
+   Queda guardada.
+3. **⚙ Configuración > Iniciar sesión con Gmail**: elegir la cuenta en el
+   navegador y aceptar. Arriba queda *Se envía desde ...*. Si el correo no es
+   Gmail, ahí mismo está *Usar otro correo* con
+   [contraseña de aplicación](#contraseña-de-aplicación). En Configuración
+   también se cambian el asunto y el mensaje (`{nombre}` y `{cedula}` se
+   cambian por los de cada persona).
+4. **+ Agregar persona** con nombre, cédula y correo, o en Configuración
+   *Abrir lista en Excel* para pegar muchas de golpe. Doble clic en una
+   persona para corregirla; clic derecho para quitarla.
+
+**Cada mes:**
+
+1. Copiar el RAR de los recibos en la carpeta. El programa se da cuenta solo
+   en unos segundos y lo abre en una subcarpeta con su nombre y la fecha, así
+   que el del mes siguiente se abre aunque se llame igual. Lo que hay en la
+   carpeta se ve en el cuadro de la izquierda.
+2. Cada persona tiene una casilla: **verde** si su recibo está, **roja** si
+   no hay ningún PDF con su cédula. Si una persona tiene varios PDF (por
+   ejemplo el de este mes y el del pasado), se usa el más nuevo según la fecha
+   del archivo.
+3. Marcar las casillas, o **Seleccionar todos** (marca solo a los que tienen
+   recibo).
+4. **Enviar**. En la columna *Estado* cada persona pasa a *➜ Enviando...* y
+   luego a *✔ Enviado* (verde) o *✖ No se envió* (rojo), y debajo de los
+   botones se ve la barra de avance. Los enviados se desmarcan solos, para no
+   mandarles dos veces. Si alguno falla, al final sale un aviso con el motivo.
+   Todo queda anotado en `envios.log`.
+5. **Imprimir** manda los recibos marcados a la impresora que Windows tenga
+   puesta por defecto.
 
 ### La lista de trabajadores
 

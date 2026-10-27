@@ -3,14 +3,14 @@
 Recibos de Pago - envia a cada trabajador su recibo por correo.
 
 Como funciona:
-  1. Se descarga el RAR con todos los recibos y se extrae en una carpeta.
-  2. Esta carpeta queda guardada en el programa.
-  3. El programa busca, para cada trabajador, el PDF que lleve su cedula
-     en el nombre (ej: Reg_35-2026_T-12345678.pdf).
-  4. Se marcan los trabajadores y se le da a "Enviar correos" o "Imprimir".
+  1. Se elige una carpeta una sola vez.
+  2. Cada mes se copia ahi el RAR con los recibos. El programa lo abre solo.
+  3. Para cada persona de la lista busca el PDF que lleve su cedula en el
+     nombre (ej: Reg_35-2026_T-12345678.pdf). Si hay varios, usa el mas nuevo.
+  4. Se marcan las personas y se le da a "Enviar" o "Imprimir".
 
-Para enviar se inicia sesion con Gmail (o se usa una contrasena de
-aplicacion para Outlook, Yahoo u otro).
+Para enviar se inicia sesion con Gmail (en Configuracion), o se usa una
+contrasena de aplicacion para Outlook, Yahoo u otro.
 
 Solo usa la libreria estandar de Python. No hay que instalar nada.
 """
@@ -23,6 +23,7 @@ import os
 import queue
 import re
 import secrets
+import shutil
 import smtplib
 import ssl
 import subprocess
@@ -124,7 +125,8 @@ def cargar_empleados():
                 correo = (fila.get("correo") or "").strip()
                 if nombre or cedula or correo:
                     lista.append({"nombre": nombre, "cedula": cedula,
-                                  "correo": correo, "marcado": False, "pdfs": []})
+                                  "correo": correo, "marcado": False, "pdfs": [],
+                                  "estado": ""})
     except Exception as e:
         messagebox.showerror("Recibos", "No se pudo leer empleados.csv:\n%s" % e)
     return lista
@@ -162,14 +164,24 @@ def indexar_recibos(carpeta):
     return indice
 
 
+def _fecha(ruta):
+    try:
+        return ruta.stat().st_mtime
+    except OSError:
+        return 0
+
+
 def emparejar(lista, indice):
     for e in lista:
         cedula = solo_digitos(e["cedula"])
         encontrados = indice.get(cedula, []) if cedula else []
         # Si quedaron recibos de meses anteriores, se usa solo el mas nuevo.
-        encontrados = sorted(encontrados, key=lambda p: (p.stat().st_mtime, p.name))
-        e["pdfs"] = encontrados[-1:]
-        e["viejos"] = max(len(encontrados) - 1, 0)
+        nuevo = sorted(encontrados, key=lambda p: (_fecha(p), p.name))[-1:]
+        if nuevo != e.get("pdfs"):
+            e["estado"] = ""  # recibo distinto: todavia no se ha enviado
+            if not nuevo:
+                e["marcado"] = False
+        e["pdfs"] = nuevo
 
 
 def buscar_descompresor():
@@ -192,22 +204,79 @@ def extraer(archivo, destino):
 
     programa = buscar_descompresor()
     if not programa:
-        return ("No se encontro WinRAR ni 7-Zip en esta computadora.\n\n"
-                "Instala uno de los dos, o extrae el RAR a mano (clic derecho "
-                "sobre el archivo > Extraer aqui) y luego elige esa carpeta.")
+        return ("No se encontró WinRAR ni 7-Zip en esta computadora.\n\n"
+                "Instala uno de los dos, o abre el RAR a mano (clic derecho "
+                "sobre el archivo > Extraer aquí) en esta misma carpeta.")
 
+    os.makedirs(destino, exist_ok=True)
     nombre = os.path.basename(programa).lower()
     if nombre.startswith("7z"):
-        cmd = [programa, "x", archivo, "-o" + destino, "-y"]
-    else:  # UnRAR.exe / WinRAR.exe
-        cmd = [programa, "x", "-o+", archivo, destino + os.sep]
+        cmd = [programa, "x", archivo, "-o" + destino, "-y", "-p-"]
+    else:  # UnRAR.exe / WinRAR.exe; -p- para que nunca se quede pidiendo clave
+        cmd = [programa, "x", "-o+", "-y", "-p-", archivo, destino + os.sep]
+        if nombre == "winrar.exe":
+            cmd.insert(1, "-ibck")  # sin ventana de WinRAR
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        # WinRAR y 7-Zip escriben en la codificacion de la consola (oem)
+        r = subprocess.run(cmd, capture_output=True, timeout=600,
+                           encoding="oem" if os.name == "nt" else None, errors="replace",
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except Exception as e:
         return str(e)
     if r.returncode != 0:
         return (r.stderr or r.stdout or "codigo %s" % r.returncode).strip()
     return None
+
+
+COMPRIMIDOS = (".rar", ".zip", ".7z")
+
+
+def extraer_rars_nuevos(carpeta, fallidos):
+    """Abre cada RAR de la carpeta en una subcarpeta propia, una sola vez.
+
+    La subcarpeta lleva la fecha del RAR, asi el del mes que viene se abre
+    aunque se llame igual. fallidos = {nombre: (tamano, fecha)} para no
+    reintentar uno que ya fallo mientras no cambie.
+    Devuelve (abiertos, errores, pendientes).
+    """
+    abiertos, errores, pendientes = [], [], False
+    ruta = Path(carpeta)
+    for comp in sorted(ruta.iterdir()):
+        if not comp.is_file() or comp.suffix.lower() not in COMPRIMIDOS:
+            continue
+        info = comp.stat()
+        fecha = time.strftime("%Y-%m-%d %H.%M", time.localtime(info.st_mtime))
+        destino = ruta / ("%s (%s)" % (comp.stem, fecha))
+        huella = (info.st_size, info.st_mtime)
+        if destino.exists() or fallidos.get(comp.name) == huella:
+            continue
+        if time.time() - info.st_mtime < 3:  # todavia se esta copiando
+            pendientes = True
+            continue
+        temporal = ruta / (comp.stem + ".abriendo")
+        shutil.rmtree(temporal, ignore_errors=True)
+        error = extraer(str(comp), temporal)
+        if error:
+            shutil.rmtree(temporal, ignore_errors=True)
+            fallidos[comp.name] = huella
+            errores.append((comp.name, error))
+        else:
+            temporal.rename(destino)
+            abiertos.append(comp.name)
+    return abiertos, errores, pendientes
+
+
+def firma_carpeta(carpeta):
+    """Lo que hay en la carpeta, para darse cuenta cuando llega algo nuevo."""
+    try:
+        ruta = Path(carpeta)
+        if not carpeta or not ruta.is_dir():
+            return None
+        return tuple(sorted(
+            (str(p), _fecha(p)) for p in ruta.rglob("*")
+            if p.suffix.lower() in (".pdf",) + COMPRIMIDOS))
+    except OSError:
+        return None
 
 
 # ---------------------------------------------------------------- Gmail
@@ -451,206 +520,183 @@ def pedir_datos(padre, titulo, datos=None):
 
 # ---------------------------------------------------------------- programa
 
+VERDE = "#2e9d4f"
+ROJO = "#d64545"
+AZUL = "#1a5fb4"
+GRIS = "#777777"
+
+# estado de cada persona: (texto en la tabla, color)
+ESTADOS = {
+    "enviando": ("➜ Enviando...", "enviando"),
+    "enviado": ("✔ Enviado", "hecho"),
+    "impreso": ("✔ Impreso", "hecho"),
+    "fallo": ("✖ No se envió", "fallo"),
+    "noimpreso": ("✖ No se imprimió", "fallo"),
+}
+
+
+def _casilla(fondo, borde, palomita=None):
+    """Cuadrito de 18x18 para marcar a cada persona."""
+    img = tk.PhotoImage(width=18, height=18)
+    img.put(borde, to=(1, 1, 17, 17))
+    img.put(fondo, to=(3, 3, 15, 15))
+    if palomita:
+        for x, y in ((4, 8), (5, 9), (6, 10), (7, 11), (8, 10), (9, 9),
+                     (10, 8), (11, 7), (12, 6), (13, 5)):
+            img.put(palomita, to=(x, y, x + 2, y + 2))
+    return img
+
+
 class App(tk.Tk):
 
     def __init__(self):
         super().__init__()
         self.title("Recibos de Pago")
         # Que quepa arriba de la barra de tareas en pantallas chicas (768 px).
-        alto = min(740, self.winfo_screenheight() - 100)
-        self.geometry("980x%d+20+10" % alto)
-        self.minsize(860, 600)
+        alto = min(580, self.winfo_screenheight() - 100)
+        self.geometry("1040x%d+20+10" % alto)
+        self.minsize(880, 420)
 
         self.config_datos = cargar_config()
         self.empleados = cargar_empleados()
         self.sesion_gmail = cargar_sesion_gmail()
         self.mensajes = queue.Queue()
         self.trabajando = False
+        self.refrescando = False
+        self.ventana_config = None
+        self.btn_gmail = self.btn_salir = None
+        self.campos_manuales = []
+        self.rars_fallidos = {}
+        self.firma = None
+        self.hay_pendientes = False
+
+        self.img = {
+            "libre": _casilla("white", VERDE),
+            "marcado": _casilla(VERDE, VERDE, "white"),
+            "falta": _casilla("#fbe3e3", ROJO),
+        }
+        c = self.config_datos
+        self.var_carpeta = tk.StringVar(value=c["carpeta"])
+        self.var_asunto = tk.StringVar(value=c["asunto"])
+        self.var_proveedor = tk.StringVar(value=c["proveedor"])
+        self.var_servidor = tk.StringVar(value=c["servidor"])
+        self.var_puerto = tk.StringVar(value=str(c["puerto"]))
+        self.var_remitente = tk.StringVar(value=c["remitente"])
+        self.var_password = tk.StringVar(value=c["password"])
+        self.var_recordar = tk.BooleanVar(value=c["recordar_password"])
+        self.var_sesion = tk.StringVar()
+        self.var_cuenta = tk.StringVar()
+        self.var_marcados = tk.StringVar()
+        self.var_progreso = tk.StringVar()
+        self.var_todos = tk.BooleanVar()
 
         self._construir()
-        self.pintar_sesion()
-        self.refrescar_recibos(avisar=False)
+        self.pintar_cuenta()
+        self.refrescar(avisar=False)
+        self.after(3000, self._vigilar_carpeta)
         self.after(200, self._vaciar_cola)
         self.protocol("WM_DELETE_WINDOW", self.cerrar)
 
-    # ---- interfaz
+    # ---- ventana principal
 
     def _construir(self):
-        ttk.Style().configure("Treeview", rowheight=24)
-        raiz = ttk.Frame(self, padding=10)
+        estilo = ttk.Style()
+        estilo.configure("Treeview", rowheight=26)
+        estilo.configure("Grande.TButton", font=("Segoe UI", 13, "bold"), padding=(10, 16))
+        estilo.configure("Gris.TLabel", foreground=GRIS)
+
+        raiz = ttk.Frame(self, padding=14)
         raiz.pack(fill="both", expand=True)
-        raiz.columnconfigure(0, weight=1)
-        raiz.rowconfigure(3, weight=1)
+        raiz.columnconfigure(1, weight=1)
+        raiz.rowconfigure(1, weight=1)
 
-        # --- carpeta
-        f1 = ttk.LabelFrame(raiz, text="Carpeta con los recibos (PDF)", padding=8)
-        f1.grid(row=0, column=0, sticky="ew")
-        f1.columnconfigure(0, weight=1)
-        self.var_carpeta = tk.StringVar(value=self.config_datos["carpeta"])
-        ttk.Entry(f1, textvariable=self.var_carpeta).grid(row=0, column=0, sticky="ew",
-                                                          padx=(0, 6))
-        ttk.Button(f1, text="Elegir carpeta...",
-                   command=self.elegir_carpeta).grid(row=0, column=1, padx=3)
-        ttk.Button(f1, text="Importar RAR...",
-                   command=self.importar_rar).grid(row=0, column=2, padx=3)
-        ttk.Button(f1, text="Volver a buscar",
-                   command=lambda: self.refrescar_recibos(True)).grid(row=0, column=3,
-                                                                      padx=3)
+        # --- arriba: carpeta y configuracion
+        # (lo de la derecha se empaca primero para que nunca quede tapado)
+        arriba = ttk.Frame(raiz)
+        arriba.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 12))
+        ttk.Button(arriba, text="Elegir carpeta",
+                   command=self.elegir_carpeta).pack(side="left")
+        self.btn_config = ttk.Button(arriba, text="⚙  Configuración",
+                                     command=self.abrir_config)
+        self.btn_config.pack(side="right")
+        ttk.Label(arriba, textvariable=self.var_cuenta,
+                  style="Gris.TLabel").pack(side="right", padx=12)
+        self.var_carpeta_corta = tk.StringVar()
+        ttk.Label(arriba, textvariable=self.var_carpeta_corta,
+                  style="Gris.TLabel").pack(side="left", padx=10)
 
-        # --- correo de quien envia
-        f2 = ttk.LabelFrame(raiz, text="Correo de quien envia", padding=8)
-        f2.grid(row=1, column=0, sticky="ew", pady=(8, 0))
-        f2.columnconfigure(1, weight=1)
-        f2.columnconfigure(4, weight=1)
+        # --- izquierda: lo que hay en la carpeta
+        izq = ttk.Frame(raiz)
+        izq.grid(row=1, column=0, sticky="ns", padx=(0, 14))
+        izq.rowconfigure(1, weight=1)
+        ttk.Label(izq, text="En la carpeta").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self.lst_archivos = tk.Listbox(izq, width=29, activestyle="none", relief="solid",
+                                       borderwidth=1, highlightthickness=0,
+                                       font=("Segoe UI", 9))
+        self.lst_archivos.grid(row=1, column=0, sticky="ns")
+        barra_izq = ttk.Scrollbar(izq, orient="vertical", command=self.lst_archivos.yview)
+        barra_izq.grid(row=1, column=1, sticky="ns")
+        self.lst_archivos.configure(yscrollcommand=barra_izq.set)
 
-        # Opcion 1: iniciar sesion con Gmail
-        fila = ttk.Frame(f2)
-        fila.grid(row=0, column=0, columnspan=5, sticky="ew")
-        self.btn_gmail = ttk.Button(fila, text="Iniciar sesion con Gmail",
-                                    command=self.iniciar_gmail)
-        self.btn_gmail.pack(side="left")
-        self.var_sesion = tk.StringVar()
-        ttk.Label(fila, textvariable=self.var_sesion).pack(side="left", padx=10)
-        self.btn_salir = ttk.Button(fila, text="Cerrar sesion",
-                                    command=self.cerrar_sesion_gmail)
-        self.btn_salir.pack(side="right")
-
-        # Opcion 2: contrasena de aplicacion (Outlook, Yahoo, u otro)
-        ttk.Label(f2, foreground="#555",
-                  text="O, si no es Gmail, con contrasena de aplicacion:").grid(
-            row=1, column=0, columnspan=5, sticky="w", pady=(10, 4))
-
-        self.var_proveedor = tk.StringVar(value=self.config_datos["proveedor"])
-        self.var_servidor = tk.StringVar(value=self.config_datos["servidor"])
-        self.var_puerto = tk.StringVar(value=str(self.config_datos["puerto"]))
-        self.var_remitente = tk.StringVar(value=self.config_datos["remitente"])
-        self.var_password = tk.StringVar(value=self.config_datos["password"])
-        self.var_recordar = tk.BooleanVar(value=self.config_datos["recordar_password"])
-
-        # Se desactivan mientras haya sesion de Gmail: (widget, estado normal)
-        self.campos_manuales = []
-
-        def manual(widget, normal="normal"):
-            self.campos_manuales.append((widget, normal))
-            return widget
-
-        ttk.Label(f2, text="Correo:").grid(row=2, column=0, sticky="e", padx=(0, 6))
-        manual(ttk.Entry(f2, textvariable=self.var_remitente)).grid(
-            row=2, column=1, sticky="ew", padx=(0, 12))
-        ttk.Label(f2, text="Contrasena de aplicacion:").grid(row=2, column=3, sticky="e",
-                                                             padx=(0, 6))
-        manual(ttk.Entry(f2, textvariable=self.var_password, show="*")).grid(
-            row=2, column=4, sticky="ew")
-
-        ttk.Label(f2, text="Servicio:").grid(row=3, column=0, sticky="e",
-                                             padx=(0, 6), pady=(6, 0))
-        combo = manual(ttk.Combobox(f2, textvariable=self.var_proveedor, state="readonly",
-                                    values=list(PROVEEDORES), width=22), "readonly")
-        combo.grid(row=3, column=1, sticky="w", pady=(6, 0))
-        combo.bind("<<ComboboxSelected>>", self.cambiar_proveedor)
-
-        ttk.Label(f2, text="Servidor:").grid(row=3, column=3, sticky="e",
-                                             padx=(0, 6), pady=(6, 0))
-        caja = ttk.Frame(f2)
-        caja.grid(row=3, column=4, sticky="ew", pady=(6, 0))
-        manual(ttk.Entry(caja, textvariable=self.var_servidor, width=24)).pack(side="left")
-        ttk.Label(caja, text=" puerto:").pack(side="left")
-        manual(ttk.Entry(caja, textvariable=self.var_puerto, width=6)).pack(side="left")
-
-        manual(ttk.Checkbutton(f2, text="Recordar la contrasena en esta computadora",
-                               variable=self.var_recordar)).grid(
-            row=4, column=1, columnspan=2, sticky="w", pady=(6, 0))
-        manual(ttk.Button(f2, text="Probar conexion",
-                          command=self.probar_conexion)).grid(
-            row=4, column=4, sticky="e", pady=(6, 0))
-
-        # --- mensaje
-        f3 = ttk.LabelFrame(raiz, text="Mensaje (se puede usar {nombre} y {cedula})",
-                            padding=8)
-        f3.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-        f3.columnconfigure(1, weight=1)
-        self.var_asunto = tk.StringVar(value=self.config_datos["asunto"])
-        ttk.Label(f3, text="Asunto:").grid(row=0, column=0, sticky="e", padx=(0, 6))
-        ttk.Entry(f3, textvariable=self.var_asunto).grid(row=0, column=1, sticky="ew")
-        self.txt_cuerpo = tk.Text(f3, height=3, wrap="word")
-        self.txt_cuerpo.insert("1.0", self.config_datos["cuerpo"])
-        self.txt_cuerpo.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-
-        # --- lista
-        f4 = ttk.LabelFrame(raiz, text="Trabajadores", padding=8)
-        f4.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
-        f4.columnconfigure(0, weight=1)
-        f4.rowconfigure(1, weight=1)
-
-        barra = ttk.Frame(f4)
-        barra.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
-        ttk.Button(barra, text="Marcar todos",
-                   command=lambda: self.marcar(True)).pack(side="left")
-        ttk.Button(barra, text="Desmarcar todos",
-                   command=lambda: self.marcar(False)).pack(side="left", padx=4)
-        ttk.Button(barra, text="Solo los que tienen recibo",
-                   command=self.marcar_con_recibo).pack(side="left", padx=4)
-        ttk.Button(barra, text="Quitar",
-                   command=self.quitar).pack(side="right")
-        ttk.Button(barra, text="Editar",
-                   command=self.editar).pack(side="right", padx=4)
-        ttk.Button(barra, text="Agregar",
-                   command=self.agregar).pack(side="right")
-        ttk.Button(barra, text="Abrir lista en Excel",
-                   command=self.abrir_csv).pack(side="right", padx=12)
-
-        columnas = ("marca", "nombre", "cedula", "correo", "recibo")
-        self.tree = ttk.Treeview(f4, columns=columnas, show="headings",
-                                 selectmode="extended")
-        for clave, titulo, ancho, ancla in (
-            ("marca", "", 34, "center"),
-            ("nombre", "Nombre y apellido", 300, "w"),
-            ("cedula", "Cedula", 110, "w"),
-            ("correo", "Correo", 260, "w"),
-            ("recibo", "Recibo", 160, "w"),
-        ):
-            self.tree.heading(clave, text=titulo)
-            self.tree.column(clave, width=ancho, anchor=ancla,
-                             stretch=(clave in ("nombre", "correo")))
-        self.tree.tag_configure("falta", foreground="#b00020")
+        # --- centro: la gente
+        centro = ttk.Frame(raiz)
+        centro.grid(row=1, column=1, sticky="nsew")
+        centro.columnconfigure(0, weight=1)
+        centro.rowconfigure(1, weight=1)
+        ttk.Checkbutton(centro, text="Seleccionar todos", variable=self.var_todos,
+                        command=self.marcar_todos).grid(row=0, column=0, sticky="w",
+                                                        pady=(0, 4))
+        self.tree = ttk.Treeview(centro, columns=("nombre", "cedula", "correo", "estado"),
+                                 show="tree headings", selectmode="browse")
+        self.tree.column("#0", width=42, minwidth=42, stretch=False, anchor="center")
+        for clave, titulo, ancho in (("nombre", "Nombre", 165), ("cedula", "Cédula", 85),
+                                     ("correo", "Correo", 175), ("estado", "Estado", 125)):
+            self.tree.heading(clave, text=titulo, anchor="w")
+            self.tree.column(clave, width=ancho, minwidth=60, anchor="w",
+                             stretch=clave in ("nombre", "correo"))
+        self.tree.tag_configure("falta", foreground=GRIS)
+        self.tree.tag_configure("aviso", foreground="#b26a00")
+        self.tree.tag_configure("enviando", foreground=AZUL)
+        self.tree.tag_configure("hecho", foreground=VERDE)
+        self.tree.tag_configure("fallo", foreground=ROJO)
         self.tree.grid(row=1, column=0, sticky="nsew")
-        scroll = ttk.Scrollbar(f4, orient="vertical", command=self.tree.yview)
-        scroll.grid(row=1, column=1, sticky="ns")
-        self.tree.configure(yscrollcommand=scroll.set)
+        barra_tabla = ttk.Scrollbar(centro, orient="vertical", command=self.tree.yview)
+        barra_tabla.grid(row=1, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=barra_tabla.set)
         self.tree.bind("<Button-1>", self.clic_tabla)
-        self.tree.bind("<Double-1>", lambda *_: self.editar())
-        self.tree.bind("<space>", self.alternar_seleccion)
+        self.tree.bind("<Double-1>", self.doble_clic)
+        self.tree.bind("<Button-3>", self.menu_tabla)
 
-        # --- acciones
-        f5 = ttk.Frame(raiz)
-        f5.grid(row=4, column=0, sticky="ew", pady=(8, 0))
-        self.btn_enviar = ttk.Button(f5, text="Enviar correos a los marcados",
-                                     command=self.enviar)
-        self.btn_enviar.pack(side="left")
-        self.btn_imprimir = ttk.Button(f5, text="Imprimir los marcados",
-                                       command=self.imprimir)
-        self.btn_imprimir.pack(side="left", padx=6)
-        self.var_estado = tk.StringVar(value="")
-        ttk.Label(f5, textvariable=self.var_estado).pack(side="left", padx=12)
+        pie = ttk.Frame(centro)
+        pie.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        ttk.Button(pie, text="+ Agregar persona", command=self.agregar).pack(side="left")
+        ttk.Label(pie, text="Doble clic en una persona para corregirla.",
+                  style="Gris.TLabel").pack(side="left", padx=10)
 
-        # --- registro
-        f6 = ttk.LabelFrame(raiz, text="Registro", padding=6)
-        f6.grid(row=5, column=0, sticky="ew", pady=(8, 0))
-        f6.columnconfigure(0, weight=1)
-        self.txt_log = tk.Text(f6, height=5, wrap="word", state="disabled")
-        self.txt_log.grid(row=0, column=0, sticky="ew")
-        s2 = ttk.Scrollbar(f6, orient="vertical", command=self.txt_log.yview)
-        s2.grid(row=0, column=1, sticky="ns")
-        self.txt_log.configure(yscrollcommand=s2.set)
+        self.menu = tk.Menu(self, tearoff=0)
+        self.menu.add_command(label="Corregir", command=self.editar)
+        self.menu.add_command(label="Quitar de la lista", command=self.quitar)
+
+        # --- derecha: enviar, imprimir y como va
+        der = ttk.Frame(raiz)
+        der.grid(row=1, column=2, sticky="n", padx=(16, 0))
+        self.btn_enviar = ttk.Button(der, text="Enviar", style="Grande.TButton",
+                                     width=12, command=self.enviar)
+        self.btn_enviar.pack(fill="x")
+        self.btn_imprimir = ttk.Button(der, text="Imprimir", style="Grande.TButton",
+                                       width=12, command=self.imprimir)
+        self.btn_imprimir.pack(fill="x", pady=(12, 0))
+        ttk.Label(der, textvariable=self.var_marcados,
+                  style="Gris.TLabel").pack(pady=(12, 0))
+        self.barra = ttk.Progressbar(der, mode="determinate")
+        self.barra.pack(fill="x", pady=(18, 6))
+        ttk.Label(der, textvariable=self.var_progreso, wraplength=180,
+                  justify="center").pack()
 
     # ---- utilidades
 
     def log(self, texto):
-        linea = time.strftime("[%H:%M:%S] ") + texto
-        self.txt_log.configure(state="normal")
-        self.txt_log.insert("end", linea + "\n")
-        self.txt_log.see("end")
-        self.txt_log.configure(state="disabled")
+        """Queda en envios.log, por si hay que revisar algo despues."""
         try:
             with open(ARCHIVO_LOG, "a", encoding="utf-8") as f:
                 f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + texto + "\n")
@@ -665,50 +711,385 @@ class App(tk.Tk):
                 break
             if tipo == "log":
                 self.log(dato)
-            elif tipo == "estado":
-                self.var_estado.set(dato)
+            elif tipo == "fila":
+                i, estado = dato
+                if i < len(self.empleados):
+                    self.empleados[i]["estado"] = estado
+                    if estado == "enviado":
+                        self.empleados[i]["marcado"] = False  # para no enviarle dos veces
+                    self.pintar_fila(i)
+                    self._contar()
+                    if estado == "enviando":
+                        self.tree.see(str(i))
+            elif tipo == "progreso":
+                hechos, total, texto = dato
+                self.barra.configure(maximum=max(total, 1), value=hechos)
+                self.var_progreso.set(texto)
             elif tipo == "sesion":
                 self.sesion_gmail = dato
-                self.pintar_sesion()
+                self.pintar_cuenta()
             elif tipo == "error":
-                messagebox.showerror("Recibos", dato)
+                messagebox.showerror("Recibos", dato, parent=self.ventana_config or self)
             elif tipo == "fin":
                 self._ocupado(False)
                 if dato:
-                    self.var_estado.set(dato)
-                else:
-                    self.pintar_tabla()
+                    self.var_progreso.set(dato)
         self.after(200, self._vaciar_cola)
 
     def _ocupado(self, si):
         self.trabajando = si
         estado = "disabled" if si else "normal"
-        for boton in (self.btn_enviar, self.btn_imprimir, self.btn_gmail):
-            boton.configure(state=estado)
+        for boton in (self.btn_enviar, self.btn_imprimir, self.btn_config, self.btn_gmail):
+            if boton is not None:
+                try:
+                    boton.configure(state=estado)
+                except tk.TclError:
+                    pass
 
     def leer_config(self):
+        if self.ventana_config is not None:
+            self.config_datos["cuerpo"] = self.txt_cuerpo.get("1.0", "end-1c")
+        puerto = self.var_puerto.get().strip()
         self.config_datos.update({
             "carpeta": self.var_carpeta.get().strip(),
             "proveedor": self.var_proveedor.get(),
             "servidor": self.var_servidor.get().strip(),
-            "puerto": int(self.var_puerto.get()) if self.var_puerto.get().strip().isdigit() else 587,
+            "puerto": int(puerto) if puerto.isdigit() else 587,
             "remitente": self.var_remitente.get().strip(),
             "password": self.var_password.get(),
             "recordar_password": bool(self.var_recordar.get()),
             "asunto": self.var_asunto.get(),
-            "cuerpo": self.txt_cuerpo.get("1.0", "end-1c"),
         })
         return self.config_datos
 
     def cerrar(self):
         if self.trabajando and not messagebox.askyesno(
-                "Recibos", "Todavia se esta enviando. ¿Cerrar de todas formas?"):
+                "Recibos", "Todavía se está enviando. ¿Cerrar de todas formas?"):
             return
         guardar_config(self.leer_config())
         guardar_empleados(self.empleados)
         self.destroy()
 
-    # ---- carpeta y recibos
+    # ---- carpeta
+
+    def elegir_carpeta(self):
+        inicio = self.var_carpeta.get() or str(Path.home())
+        carpeta = filedialog.askdirectory(title="Carpeta donde se meten los RAR de los recibos",
+                                          initialdir=inicio)
+        if carpeta:
+            self.var_carpeta.set(os.path.normpath(carpeta))
+            guardar_config(self.leer_config())
+            self.refrescar(avisar=True)
+
+    def _vigilar_carpeta(self):
+        """Cada 3 segundos mira si llego algo nuevo a la carpeta (un RAR)."""
+        if not self.trabajando and not self.refrescando:
+            carpeta = self.var_carpeta.get().strip()
+            if self.hay_pendientes or firma_carpeta(carpeta) != self.firma:
+                self.refrescar(avisar=False)
+        self.after(3000, self._vigilar_carpeta)
+
+    def refrescar(self, avisar=True):
+        if self.refrescando:
+            return
+        self.refrescando = True
+        try:
+            carpeta = self.var_carpeta.get().strip()
+            errores = []
+            self.hay_pendientes = False
+            if carpeta and os.path.isdir(carpeta):
+                self.configure(cursor="watch")
+                self.update_idletasks()
+                try:
+                    abiertos, errores, self.hay_pendientes = extraer_rars_nuevos(
+                        carpeta, self.rars_fallidos)
+                except Exception as e:
+                    abiertos, errores = [], [("la carpeta", str(e))]
+                finally:
+                    self.configure(cursor="")
+                for nombre in abiertos:
+                    self.log("Abierto %s" % nombre)
+            indice = indexar_recibos(carpeta)
+            emparejar(self.empleados, indice)
+            self.firma = firma_carpeta(carpeta)
+            self.pintar_archivos(carpeta)
+            self.pintar_tabla()
+            for nombre, error in errores:
+                self.log("No se pudo abrir %s: %s" % (nombre, error))
+                messagebox.showerror("Recibos", "No se pudo abrir %s\n\n%s" % (nombre, error))
+            if (avisar and self.empleados and indice
+                    and not any(e["pdfs"] for e in self.empleados)):
+                messagebox.showwarning(
+                    "Recibos",
+                    "Hay recibos en la carpeta pero ninguno coincide con las cédulas "
+                    "de la lista.\nRevisa que las cédulas estén bien escritas.")
+        finally:
+            self.refrescando = False
+
+    def pintar_archivos(self, carpeta):
+        # arriba se ve solo el final de la ruta, si es muy larga
+        partes = Path(carpeta).parts if carpeta else ()
+        corta = carpeta if len(carpeta) <= 45 else os.path.join("...", *partes[-2:])
+        self.var_carpeta_corta.set(corta)
+        lista = self.lst_archivos
+        lista.delete(0, "end")
+        if not carpeta or not os.path.isdir(carpeta):
+            lista.insert("end", "  Dale a Elegir carpeta.")
+            return
+        ruta = Path(carpeta)
+        try:
+            comprimidos = sorted(p.name for p in ruta.iterdir()
+                                 if p.is_file() and p.suffix.lower() in COMPRIMIDOS)
+            pdfs = sorted(p.name for p in ruta.rglob("*.pdf"))
+        except OSError:
+            comprimidos, pdfs = [], []
+        for nombre in comprimidos:
+            lista.insert("end", "  " + nombre)
+            lista.itemconfig("end", foreground=AZUL)
+        if pdfs:
+            lista.insert("end", "  %d recibos:" % len(pdfs))
+            lista.itemconfig("end", foreground=GRIS)
+            for nombre in pdfs:
+                lista.insert("end", "  " + nombre)
+        if not comprimidos and not pdfs:
+            lista.insert("end", "  Todavía no hay recibos.")
+            lista.insert("end", "  Copia aquí el RAR.")
+
+    # ---- tabla
+
+    def pintar_fila(self, i):
+        e = self.empleados[i]
+        if not e["pdfs"]:
+            casilla, texto, color = "falta", "Sin recibo", "falta"
+        else:
+            casilla = "marcado" if e["marcado"] else "libre"
+            if e.get("estado") in ESTADOS:
+                texto, color = ESTADOS[e["estado"]]
+            elif "@" not in e["correo"]:
+                texto, color = "Falta el correo", "aviso"
+            else:
+                texto, color = "Listo", ""
+        datos = {"image": self.img[casilla], "tags": (color,) if color else (),
+                 "values": (e["nombre"], e["cedula"], e["correo"], texto)}
+        iid = str(i)
+        if self.tree.exists(iid):
+            self.tree.item(iid, **datos)
+        else:
+            self.tree.insert("", "end", iid=iid, **datos)
+
+    def pintar_tabla(self):
+        seleccion = self.tree.selection()
+        self.tree.delete(*self.tree.get_children())
+        for i in range(len(self.empleados)):
+            self.pintar_fila(i)
+        for iid in seleccion:
+            if self.tree.exists(iid):
+                self.tree.selection_set(iid)
+        self._contar()
+
+    def _contar(self):
+        con_recibo = [e for e in self.empleados if e["pdfs"]]
+        marcados = sum(1 for e in con_recibo if e["marcado"])
+        self.var_marcados.set("%d de %d seleccionados" % (marcados, len(con_recibo)))
+        self.var_todos.set(bool(con_recibo) and marcados == len(con_recibo))
+
+    def clic_tabla(self, evento):
+        if self.tree.identify_column(evento.x) != "#0":
+            return None
+        if self.tree.identify_region(evento.x, evento.y) == "heading":
+            self.var_todos.set(not self.var_todos.get())
+            self.marcar_todos()
+            return "break"
+        fila = self.tree.identify_row(evento.y)
+        if fila and not self.trabajando:
+            e = self.empleados[int(fila)]
+            if e["pdfs"]:
+                e["marcado"] = not e["marcado"]
+                self.pintar_fila(int(fila))
+                self._contar()
+        return "break"
+
+    def marcar_todos(self):
+        if not self.trabajando:
+            valor = self.var_todos.get()
+            for e in self.empleados:
+                e["marcado"] = valor and bool(e["pdfs"])
+        self.pintar_tabla()
+
+    def doble_clic(self, evento):
+        if self.tree.identify_column(evento.x) == "#0":
+            return "break"
+        fila = self.tree.identify_row(evento.y)
+        if fila:
+            self.tree.selection_set(fila)
+            self.editar()
+        return "break"
+
+    def menu_tabla(self, evento):
+        fila = self.tree.identify_row(evento.y)
+        if fila:
+            self.tree.selection_set(fila)
+            self.menu.tk_popup(evento.x_root, evento.y_root)
+
+    def _reemparejar(self):
+        emparejar(self.empleados, indexar_recibos(self.var_carpeta.get().strip()))
+        self.pintar_tabla()
+
+    def agregar(self):
+        if self.trabajando:
+            return
+        datos = pedir_datos(self, "Agregar persona")
+        if datos:
+            datos.update({"marcado": False, "pdfs": [], "estado": ""})
+            self.empleados.append(datos)
+            guardar_empleados(self.empleados)
+            self._reemparejar()
+            self.tree.see(str(len(self.empleados) - 1))
+
+    def editar(self):
+        seleccion = self.tree.selection()
+        if not seleccion or self.trabajando:
+            return
+        i = int(seleccion[0])
+        datos = pedir_datos(self, "Corregir persona", self.empleados[i])
+        if datos:
+            self.empleados[i].update(datos)
+            guardar_empleados(self.empleados)
+            self._reemparejar()
+
+    def quitar(self):
+        seleccion = self.tree.selection()
+        if not seleccion or self.trabajando:
+            return
+        i = int(seleccion[0])
+        if not messagebox.askyesno("Recibos", "¿Quitar a %s de la lista?"
+                                   % self.empleados[i]["nombre"]):
+            return
+        del self.empleados[i]
+        guardar_empleados(self.empleados)
+        self.pintar_tabla()
+
+    # ---- configuracion
+
+    def abrir_config(self):
+        if self.trabajando:
+            return
+        if self.ventana_config is not None:
+            self.ventana_config.lift()
+            return
+        win = tk.Toplevel(self)
+        self.ventana_config = win
+        win.title("Configuración")
+        win.transient(self)
+        win.resizable(False, False)
+        win.protocol("WM_DELETE_WINDOW", self.cerrar_config)
+        marco = ttk.Frame(win, padding=16)
+        marco.pack(fill="both", expand=True)
+        marco.columnconfigure(0, weight=1)
+
+        # cuenta de Gmail
+        f1 = ttk.LabelFrame(marco, text="Correo que envía los recibos", padding=12)
+        f1.grid(row=0, column=0, sticky="ew")
+        self.btn_gmail = ttk.Button(f1, command=self.iniciar_gmail)
+        self.btn_gmail.pack(side="left")
+        ttk.Label(f1, textvariable=self.var_sesion).pack(side="left", padx=12)
+        self.btn_salir = ttk.Button(f1, text="Cerrar sesión", command=self.cerrar_sesion_gmail)
+        self.btn_salir.pack(side="right")
+
+        # mensaje
+        f2 = ttk.LabelFrame(marco, text="Mensaje", padding=12)
+        f2.grid(row=1, column=0, sticky="ew", pady=(14, 0))
+        f2.columnconfigure(1, weight=1)
+        ttk.Label(f2, text="Asunto:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Entry(f2, textvariable=self.var_asunto, width=56).grid(row=0, column=1,
+                                                                  sticky="ew")
+        self.txt_cuerpo = tk.Text(f2, height=5, width=56, wrap="word", relief="solid",
+                                  borderwidth=1, font=("Segoe UI", 10))
+        self.txt_cuerpo.insert("1.0", self.config_datos["cuerpo"])
+        self.txt_cuerpo.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        ttk.Label(f2, style="Gris.TLabel",
+                  text="Donde dice {nombre} o {cedula} se pone el de cada persona.").grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        # lista de personas
+        f3 = ttk.LabelFrame(marco, text="Lista de personas", padding=12)
+        f3.grid(row=2, column=0, sticky="ew", pady=(14, 0))
+        ttk.Button(f3, text="Abrir lista en Excel", command=self.abrir_csv).pack(side="left")
+        ttk.Label(f3, style="Gris.TLabel",
+                  text="Para cargar muchas personas de una vez.").pack(side="left", padx=12)
+
+        # otro correo (escondido, para Outlook, Yahoo o sin el boton de Gmail)
+        self.btn_otro = ttk.Button(marco, style="Toolbutton", command=self._alternar_otro)
+        self.btn_otro.grid(row=3, column=0, sticky="w", pady=(14, 0))
+        self.f_otro = ttk.Frame(marco, padding=(18, 6, 0, 0))
+        self.f_otro.grid(row=4, column=0, sticky="ew")
+        self._llenar_otro(self.f_otro)
+        self._mostrar_otro(not self.sesion_gmail and bool(self.var_remitente.get().strip()))
+
+        ttk.Button(marco, text="Listo", command=self.cerrar_config).grid(
+            row=5, column=0, sticky="e", pady=(16, 0))
+        self.pintar_cuenta()
+        win.grab_set()
+
+    def _llenar_otro(self, f):
+        f.columnconfigure(1, weight=1)
+        self.campos_manuales = []
+
+        def manual(widget, normal="normal"):
+            self.campos_manuales.append((widget, normal))
+            return widget
+
+        ttk.Label(f, text="Correo:").grid(row=0, column=0, sticky="e", padx=(0, 6), pady=3)
+        manual(ttk.Entry(f, textvariable=self.var_remitente, width=34)).grid(
+            row=0, column=1, sticky="ew", pady=3)
+        ttk.Label(f, text="Contraseña de aplicación:").grid(row=1, column=0, sticky="e",
+                                                           padx=(0, 6), pady=3)
+        manual(ttk.Entry(f, textvariable=self.var_password, show="*", width=34)).grid(
+            row=1, column=1, sticky="ew", pady=3)
+        ttk.Label(f, text="Servicio:").grid(row=2, column=0, sticky="e", padx=(0, 6), pady=3)
+        combo = manual(ttk.Combobox(f, textvariable=self.var_proveedor, state="readonly",
+                                    values=list(PROVEEDORES), width=24), "readonly")
+        combo.grid(row=2, column=1, sticky="w", pady=3)
+        combo.bind("<<ComboboxSelected>>", self.cambiar_proveedor)
+        ttk.Label(f, text="Servidor:").grid(row=3, column=0, sticky="e", padx=(0, 6), pady=3)
+        caja = ttk.Frame(f)
+        caja.grid(row=3, column=1, sticky="w", pady=3)
+        manual(ttk.Entry(caja, textvariable=self.var_servidor, width=24)).pack(side="left")
+        ttk.Label(caja, text="  puerto:").pack(side="left")
+        manual(ttk.Entry(caja, textvariable=self.var_puerto, width=6)).pack(side="left")
+        abajo = ttk.Frame(f)
+        abajo.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        manual(ttk.Checkbutton(abajo, text="Recordar la contraseña",
+                               variable=self.var_recordar)).pack(side="left")
+        manual(ttk.Button(abajo, text="Probar conexión",
+                          command=self.probar_conexion)).pack(side="right")
+        ttk.Label(f, style="Gris.TLabel",
+                  text="Si hay sesión de Gmail se usa Gmail, y esto queda apagado.").grid(
+            row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+    def _mostrar_otro(self, abrir):
+        self.otro_abierto = abrir
+        if abrir:
+            self.f_otro.grid()
+        else:
+            self.f_otro.grid_remove()
+        self.btn_otro.configure(text=("▾ " if abrir else "▸ ") + "Usar otro correo "
+                                "(Outlook, Yahoo...) con contraseña de aplicación")
+
+    def _alternar_otro(self):
+        self._mostrar_otro(not self.otro_abierto)
+
+    def cerrar_config(self):
+        win = self.ventana_config
+        if win is None:
+            return
+        guardar_config(self.leer_config())
+        self.ventana_config = None
+        self.btn_gmail = self.btn_salir = None
+        self.campos_manuales = []
+        win.grab_release()
+        win.destroy()
+        self.pintar_cuenta()
 
     def cambiar_proveedor(self, *_):
         servidor, puerto = PROVEEDORES.get(self.var_proveedor.get(), ("", 587))
@@ -716,162 +1097,39 @@ class App(tk.Tk):
             self.var_servidor.set(servidor)
             self.var_puerto.set(str(puerto))
 
-    def elegir_carpeta(self):
-        inicio = self.var_carpeta.get() or str(Path.home())
-        carpeta = filedialog.askdirectory(title="Carpeta donde estan los PDF",
-                                          initialdir=inicio)
-        if carpeta:
-            self.var_carpeta.set(carpeta)
-            guardar_config(self.leer_config())
-            self.refrescar_recibos(True)
-
-    def importar_rar(self):
-        archivo = filedialog.askopenfilename(
-            title="Elige el RAR que descargaste",
-            filetypes=[("Comprimidos", "*.rar *.zip *.7z"), ("Todos", "*.*")])
-        if not archivo:
-            return
-        destino = self.var_carpeta.get().strip()
-        if not destino:
-            destino = filedialog.askdirectory(
-                title="¿En que carpeta se van a guardar los recibos?")
-            if not destino:
-                return
-            self.var_carpeta.set(destino)
-        os.makedirs(destino, exist_ok=True)
-        self.log("Extrayendo %s ..." % os.path.basename(archivo))
-        error = extraer(archivo, destino)
-        if error:
-            self.log("ERROR al extraer: %s" % error.splitlines()[0])
-            messagebox.showerror("Recibos", error)
-            return
-        guardar_config(self.leer_config())
-        self.refrescar_recibos(True)
-
-    def refrescar_recibos(self, avisar=True):
-        carpeta = self.var_carpeta.get().strip()
-        indice = indexar_recibos(carpeta)
-        emparejar(self.empleados, indice)
-        self.pintar_tabla()
-        total = sum(len(v) for v in indice.values())
-        con = sum(1 for e in self.empleados if e["pdfs"])
-        if avisar or total:
-            self.log("Carpeta: %s | %d PDF encontrados | %d de %d trabajadores "
-                     "con recibo" % (carpeta or "(sin elegir)", total, con,
-                                     len(self.empleados)))
-        if avisar and self.empleados and con == 0 and total:
-            messagebox.showwarning(
-                "Recibos",
-                "Se encontraron PDF pero ninguno coincide con las cedulas de la "
-                "lista.\nRevisa que las cedulas esten bien escritas.")
-
-    # ---- tabla
-
-    def pintar_tabla(self):
-        seleccion = set(self.tree.selection())
-        self.tree.delete(*self.tree.get_children())
-        for i, e in enumerate(self.empleados):
-            if not e["pdfs"]:
-                estado, etiquetas = "sin recibo", ("falta",)
-            elif e.get("viejos"):
-                estado, etiquetas = "listo (+%d viejos)" % e["viejos"], ()
-            else:
-                estado, etiquetas = "listo", ()
-            self.tree.insert("", "end", iid=str(i), tags=etiquetas,
-                             values=("X" if e["marcado"] else "",
-                                     e["nombre"], e["cedula"], e["correo"], estado))
-        for iid in seleccion:
-            if self.tree.exists(iid):
-                self.tree.selection_add(iid)
-        marcados = sum(1 for e in self.empleados if e["marcado"])
-        self.var_estado.set("%d marcados de %d" % (marcados, len(self.empleados)))
-
-    def clic_tabla(self, evento):
-        if self.tree.identify_region(evento.x, evento.y) != "cell":
-            return None
-        if self.tree.identify_column(evento.x) != "#1":
-            return None
-        fila = self.tree.identify_row(evento.y)
-        if fila:
-            i = int(fila)
-            self.empleados[i]["marcado"] = not self.empleados[i]["marcado"]
-            self.pintar_tabla()
-        return "break"
-
-    def alternar_seleccion(self, *_):
-        for iid in self.tree.selection():
-            i = int(iid)
-            self.empleados[i]["marcado"] = not self.empleados[i]["marcado"]
-        self.pintar_tabla()
-        return "break"
-
-    def marcar(self, valor):
-        for e in self.empleados:
-            e["marcado"] = valor
-        self.pintar_tabla()
-
-    def marcar_con_recibo(self):
-        for e in self.empleados:
-            e["marcado"] = bool(e["pdfs"]) and bool(e["correo"])
-        self.pintar_tabla()
-
-    def agregar(self):
-        datos = pedir_datos(self, "Agregar trabajador")
-        if datos:
-            datos.update({"marcado": False, "pdfs": []})
-            self.empleados.append(datos)
-            guardar_empleados(self.empleados)
-            self.refrescar_recibos(False)
-
-    def editar(self):
-        seleccion = self.tree.selection()
-        if not seleccion:
-            return
-        i = int(seleccion[0])
-        datos = pedir_datos(self, "Editar trabajador", self.empleados[i])
-        if datos:
-            self.empleados[i].update(datos)
-            guardar_empleados(self.empleados)
-            self.refrescar_recibos(False)
-
-    def quitar(self):
-        seleccion = self.tree.selection()
-        if not seleccion:
-            return
-        if not messagebox.askyesno("Recibos",
-                                   "¿Quitar %d de la lista?" % len(seleccion)):
-            return
-        for i in sorted((int(x) for x in seleccion), reverse=True):
-            del self.empleados[i]
-        guardar_empleados(self.empleados)
-        self.pintar_tabla()
-
     def abrir_csv(self):
+        padre = self.ventana_config or self
         guardar_empleados(self.empleados)
         try:
             os.startfile(str(ARCHIVO_EMPLEADOS))
         except Exception as e:
-            messagebox.showerror("Recibos", str(e))
+            messagebox.showerror("Recibos", str(e), parent=padre)
             return
         messagebox.showinfo(
             "Recibos",
-            "Edita la lista, guardala y cierra Excel.\n"
-            "Despues da clic en Aceptar para volver a cargarla.")
+            "Escribe la lista en Excel (nombre, cédula y correo), guárdala y "
+            "cierra Excel.\n\nDespués dale a Aceptar para cargarla.", parent=padre)
         self.empleados = cargar_empleados()
-        self.refrescar_recibos(False)
+        self._reemparejar()
 
     # ---- sesion de Gmail
 
-    def pintar_sesion(self):
+    def pintar_cuenta(self):
         if self.sesion_gmail:
             correo = self.sesion_gmail.get("correo") or "tu cuenta de Gmail"
             self.var_sesion.set("Conectado como %s" % correo)
-            self.btn_gmail.configure(text="Cambiar de cuenta")
-            self.btn_salir.configure(state="normal")
+            self.var_cuenta.set("Se envía desde %s" % correo)
         else:
-            self.var_sesion.set("No has iniciado sesion.")
-            self.btn_gmail.configure(text="Iniciar sesion con Gmail")
-            self.btn_salir.configure(state="disabled")
+            self.var_sesion.set("No has iniciado sesión.")
+            remitente = self.var_remitente.get().strip()
+            if remitente and self.var_password.get():
+                self.var_cuenta.set("Se envía desde %s" % remitente)
+            else:
+                self.var_cuenta.set("⚠ Falta configurar el correo")
+        if self.btn_gmail is not None:
+            self.btn_gmail.configure(text="Cambiar de cuenta" if self.sesion_gmail
+                                     else "Iniciar sesión con Gmail")
+            self.btn_salir.configure(state="normal" if self.sesion_gmail else "disabled")
         for widget, normal in self.campos_manuales:
             widget.configure(state="disabled" if self.sesion_gmail else normal)
 
@@ -881,14 +1139,15 @@ class App(tk.Tk):
         if not buscar_client_secret():
             messagebox.showwarning(
                 "Recibos",
-                "Este programa todavia no tiene configurado el inicio de sesion "
+                "Este programa todavía no tiene configurado el inicio de sesión "
                 "con Gmail (falta el archivo client_secret.json).\n\n"
-                "Mira el README, parte 'Iniciar sesion con Gmail'. Mientras "
-                "tanto se puede usar la contrasena de aplicacion.")
+                "Mira el README, parte 'Iniciar sesión con Gmail'. Mientras "
+                "tanto se puede usar otro correo con contraseña de aplicación.",
+                parent=self.ventana_config or self)
             return
         self._ocupado(True)
-        self.var_estado.set("Esperando el inicio de sesion en el navegador...")
-        self.log("Se abrio el navegador: elige la cuenta de Gmail y dale a Continuar.")
+        self.var_sesion.set("Termina de iniciar sesión en el navegador...")
+        self.log("Se abrio el navegador para iniciar sesion con Gmail.")
         threading.Thread(target=self._hilo_login, daemon=True).start()
 
     def _hilo_login(self):
@@ -896,9 +1155,10 @@ class App(tk.Tk):
             sesion = gmail_login()
         except Exception as e:
             self.mensajes.put(("log", "No se pudo iniciar sesion: %s" % detalle(e)))
-            self.mensajes.put(("error", "No se pudo iniciar sesion con Gmail:\n%s"
-                               % detalle(e)))
+            self.mensajes.put(("sesion", self.sesion_gmail))
             self.mensajes.put(("fin", ""))
+            self.mensajes.put(("error", "No se pudo iniciar sesión con Gmail:\n%s"
+                               % detalle(e)))
             return
         self.mensajes.put(("sesion", sesion))
         self.mensajes.put(("log", "Sesion iniciada como %s"
@@ -909,32 +1169,27 @@ class App(tk.Tk):
         if not self.sesion_gmail or self.trabajando:
             return
         if not messagebox.askyesno("Recibos",
-                                   "¿Cerrar la sesion de Gmail en esta computadora?"):
+                                   "¿Cerrar la sesión de Gmail en esta computadora?",
+                                   parent=self.ventana_config or self):
             return
         threading.Thread(target=revocar_gmail,
                          args=(self.sesion_gmail.get("refresh_token"),),
                          daemon=True).start()
         borrar_sesion_gmail()
         self.sesion_gmail = None
-        self.pintar_sesion()
+        self.pintar_cuenta()
         self.log("Sesion de Gmail cerrada.")
 
     # ---- envio
 
-    def datos_smtp(self):
-        cfg = self.leer_config()
+    def _falta_smtp(self, cfg):
         if not cfg["remitente"] or "@" not in cfg["remitente"]:
-            messagebox.showwarning("Recibos", "Dale a Iniciar sesion con Gmail, o escribe "
-                                   "el correo y la contrasena de aplicacion.")
-            return None
+            return "Falta poner el correo que envía."
         if not cfg["password"]:
-            messagebox.showwarning("Recibos", "Escribe la contrasena de aplicacion.")
-            return None
+            return "Falta la contraseña de aplicación."
         if not cfg["servidor"]:
-            messagebox.showwarning("Recibos", "Escribe el servidor de correo.")
-            return None
-        guardar_config(cfg)
-        return cfg
+            return "Falta el servidor de correo."
+        return None
 
     def conectar(self, cfg):
         if cfg["puerto"] == 465:
@@ -946,83 +1201,85 @@ class App(tk.Tk):
         return servidor
 
     def probar_conexion(self):
-        cfg = self.datos_smtp()
-        if not cfg:
+        padre = self.ventana_config or self
+        cfg = self.leer_config()
+        falta = self._falta_smtp(cfg)
+        if falta:
+            messagebox.showwarning("Recibos", falta, parent=padre)
             return
+        guardar_config(cfg)
         try:
-            servidor = self.conectar(cfg)
-            servidor.quit()
+            self.conectar(cfg).quit()
         except Exception as e:
             self.log("Conexion fallida: %s" % e)
             messagebox.showerror(
                 "Recibos",
-                "No se pudo entrar al correo:\n%s\n\n"
-                "Si usas Gmail u Outlook necesitas una 'contrasena de aplicacion', "
-                "no la contrasena normal. Mira el README." % e)
+                "No se pudo entrar al correo:\n%s\n\nRecuerda que va la contraseña "
+                "de aplicación, no la contraseña normal." % e, parent=padre)
             return
         self.log("Conexion correcta con %s" % cfg["servidor"])
-        messagebox.showinfo("Recibos", "Todo bien, el correo funciona.")
+        self.pintar_cuenta()
+        messagebox.showinfo("Recibos", "Todo bien, el correo funciona.", parent=padre)
 
     def enviar(self):
         if self.trabajando:
             return
+        cfg = self.leer_config()
         sesion = self.sesion_gmail
-        if sesion:
-            cfg = self.leer_config()
-            guardar_config(cfg)
-            remitente = sesion.get("correo") or "tu cuenta de Gmail"
-        else:
-            cfg = self.datos_smtp()
-            if not cfg:
-                return
-            remitente = cfg["remitente"]
-        marcados = [e for e in self.empleados if e["marcado"]]
-        if not marcados:
-            messagebox.showwarning("Recibos", "No hay nadie marcado.")
+        if not sesion and self._falta_smtp(cfg):
+            messagebox.showinfo("Recibos", "Antes de enviar hay que poner el correo.\n\n"
+                                "En Configuración, dale a Iniciar sesión con Gmail.")
+            self.abrir_config()
             return
-        sin_correo = [e["nombre"] for e in marcados if "@" not in e["correo"]]
-        sin_pdf = [e["nombre"] for e in marcados if not e["pdfs"]]
-        listos = [e for e in marcados if "@" in e["correo"] and e["pdfs"]]
+        guardar_config(cfg)
+        remitente = (sesion.get("correo") or "tu cuenta de Gmail") if sesion \
+            else cfg["remitente"]
+        elegidos = [(i, e) for i, e in enumerate(self.empleados)
+                    if e["marcado"] and e["pdfs"]]
+        if not elegidos:
+            messagebox.showinfo("Recibos", "No hay nadie seleccionado.\n\nMarca las "
+                                "casillas verdes, o dale a Seleccionar todos.")
+            return
+        sin_correo = [e["nombre"] for _, e in elegidos if "@" not in e["correo"]]
+        listos = [(i, e) for i, e in elegidos if "@" in e["correo"]]
         if not listos:
-            messagebox.showwarning("Recibos",
-                                   "Ninguno de los marcados tiene correo y recibo.")
+            messagebox.showwarning("Recibos", "Ninguno de los seleccionados tiene correo.")
             return
-        aviso = "Se van a enviar %d correos desde %s." % (len(listos), remitente)
+        aviso = "Se van a enviar %d recibos desde\n%s" % (len(listos), remitente)
         if sin_correo:
-            aviso += "\n\nSe saltan por no tener correo: %s" % ", ".join(sin_correo[:8])
-        if sin_pdf:
-            aviso += "\n\nSe saltan por no tener recibo: %s" % ", ".join(sin_pdf[:8])
-        aviso += "\n\n¿Continuar?"
-        if not messagebox.askyesno("Recibos", aviso):
+            aviso += "\n\nNo tienen correo y se saltan: %s" % ", ".join(sin_correo[:8])
+        if not messagebox.askyesno("Recibos", aviso + "\n\n¿Enviar?"):
             return
-
         self._ocupado(True)
-        threading.Thread(target=self._hilo_enviar, args=(cfg, sesion, listos),
+        threading.Thread(target=self._hilo_enviar, args=(dict(cfg), sesion, listos),
                          daemon=True).start()
 
     def _hilo_enviar(self, cfg, sesion, listos):
-        enviados = fallidos = 0
+        total = len(listos)
+        enviados, fallidos = 0, []
         servidor = token = None
+        self.mensajes.put(("progreso", (0, total, "Conectando...")))
         try:
             if sesion:
                 remitente = sesion.get("correo", "")
-                self.mensajes.put(("log", "Entrando a Gmail como %s ..."
-                                   % (remitente or "?")))
                 token = gmail_access_token(sesion)
             else:
                 remitente = cfg["remitente"]
-                self.mensajes.put(("log", "Entrando a %s ..." % cfg["servidor"]))
                 servidor = self.conectar(cfg)
         except Exception as e:
-            self.mensajes.put(("log", "ERROR de conexion: %s" % detalle(e)))
-            if sesion:
-                self.mensajes.put(("log", "Prueba con Cerrar sesion y volver a "
-                                          "iniciar sesion con Gmail."))
-            self.mensajes.put(("fin", "No se pudo conectar"))
+            texto = detalle(e)
+            self.mensajes.put(("log", "ERROR de conexion: %s" % texto))
+            ayuda = ("En Configuración, cierra sesión y vuelve a iniciar sesión con Gmail."
+                     if sesion else "Revisa el correo y la contraseña en Configuración.")
+            self.mensajes.put(("progreso", (0, total, "")))
+            self.mensajes.put(("fin", "✖ No se pudo entrar al correo"))
+            self.mensajes.put(("error", "No se pudo entrar al correo:\n%s\n\n%s"
+                               % (texto, ayuda)))
             return
 
-        for n, emp in enumerate(listos, 1):
-            self.mensajes.put(("estado", "Enviando %d de %d..." % (n, len(listos))))
+        for n, (i, emp) in enumerate(listos, 1):
+            self.mensajes.put(("fila", (i, "enviando")))
+            self.mensajes.put(("progreso", (n - 1, total, "Enviando %d de %d..." % (n, total))))
             try:
                 msg = self._armar_correo(cfg, remitente, emp)
                 if servidor:
@@ -1036,20 +1293,29 @@ class App(tk.Tk):
                         token = gmail_access_token(sesion)  # vencio la hora
                         gmail_enviar(token, msg)
                 enviados += 1
-                self.mensajes.put(("log", "OK  %s -> %s" % (emp["nombre"],
-                                                            emp["correo"])))
+                self.mensajes.put(("fila", (i, "enviado")))
+                self.mensajes.put(("log", "OK  %s -> %s" % (emp["nombre"], emp["correo"])))
             except Exception as e:
-                fallidos += 1
+                texto = detalle(e)
+                fallidos.append("%s: %s" % (emp["nombre"], texto))
+                self.mensajes.put(("fila", (i, "fallo")))
                 self.mensajes.put(("log", "FALLO  %s -> %s : %s" % (
-                    emp["nombre"], emp["correo"], detalle(e))))
+                    emp["nombre"], emp["correo"], texto)))
         if servidor:
             try:
                 servidor.quit()
             except Exception:
                 pass
+        self.mensajes.put(("progreso", (total, total, "")))
         self.mensajes.put(("log", "Terminado: %d enviados, %d con fallo"
-                           % (enviados, fallidos)))
-        self.mensajes.put(("fin", "%d enviados, %d con fallo" % (enviados, fallidos)))
+                           % (enviados, len(fallidos))))
+        if fallidos:
+            self.mensajes.put(("fin", "✔ %d enviados\n✖ %d no se enviaron"
+                               % (enviados, len(fallidos))))
+            self.mensajes.put(("error", "%d no se pudieron enviar:\n\n%s"
+                               % (len(fallidos), "\n".join(fallidos[:6]))))
+        else:
+            self.mensajes.put(("fin", "✔ Listo, %d enviados" % enviados))
 
     def _armar_correo(self, cfg, remitente, emp):
         msg = EmailMessage()
@@ -1074,40 +1340,47 @@ class App(tk.Tk):
     def imprimir(self):
         if self.trabajando:
             return
-        pdfs = []
-        for e in self.empleados:
-            if e["marcado"]:
-                pdfs.extend(e["pdfs"])
-        if not pdfs:
-            messagebox.showwarning("Recibos", "No hay recibos marcados para imprimir.")
+        elegidos = [(i, e) for i, e in enumerate(self.empleados)
+                    if e["marcado"] and e["pdfs"]]
+        if not elegidos:
+            messagebox.showinfo("Recibos", "No hay nadie seleccionado.\n\nMarca las "
+                                "casillas verdes, o dale a Seleccionar todos.")
             return
         if not messagebox.askyesno(
                 "Recibos",
-                "Se van a mandar %d recibos a la impresora que esta puesta por "
-                "defecto en Windows.\n\n¿Continuar?" % len(pdfs)):
+                "Se van a imprimir %d recibos en la impresora que Windows tiene "
+                "puesta por defecto.\n\n¿Imprimir?" % len(elegidos)):
             return
         self._ocupado(True)
-        threading.Thread(target=self._hilo_imprimir, args=(pdfs,), daemon=True).start()
+        threading.Thread(target=self._hilo_imprimir, args=(elegidos,), daemon=True).start()
 
-    def _hilo_imprimir(self, pdfs):
+    def _hilo_imprimir(self, elegidos):
+        total = len(elegidos)
         ok = malos = 0
-        for n, pdf in enumerate(pdfs, 1):
-            self.mensajes.put(("estado", "Imprimiendo %d de %d..." % (n, len(pdfs))))
+        for n, (i, emp) in enumerate(elegidos, 1):
+            self.mensajes.put(("progreso", (n - 1, total,
+                                            "Imprimiendo %d de %d..." % (n, total))))
             try:
-                os.startfile(str(pdf), "print")
+                for pdf in emp["pdfs"]:
+                    os.startfile(str(pdf), "print")
                 ok += 1
-                self.mensajes.put(("log", "A la impresora: %s" % pdf.name))
+                self.mensajes.put(("fila", (i, "impreso")))
+                self.mensajes.put(("log", "Impreso: %s" % emp["nombre"]))
             except Exception as e:
                 malos += 1
-                self.mensajes.put(("log", "No se pudo imprimir %s : %s" % (pdf.name, e)))
+                self.mensajes.put(("fila", (i, "noimpreso")))
+                self.mensajes.put(("log", "No se pudo imprimir %s : %s" % (emp["nombre"], e)))
             time.sleep(1.5)
+        self.mensajes.put(("progreso", (total, total, "")))
         if malos:
+            self.mensajes.put(("fin", "✔ %d impresos\n✖ %d no se imprimieron" % (ok, malos)))
             self.mensajes.put((
-                "log",
-                "Si no imprime nada, abre un PDF, dale clic derecho > Abrir con > "
-                "Adobe Reader y ponlo como programa por defecto para PDF."))
-        self.mensajes.put(("log", "Impresion: %d enviados, %d con fallo" % (ok, malos)))
-        self.mensajes.put(("fin", "%d a la impresora, %d con fallo" % (ok, malos)))
+                "error",
+                "No se pudieron imprimir %d recibos.\n\nSi no sale nada, abre un PDF con "
+                "clic derecho > Abrir con > Adobe Reader, y ponlo como programa por "
+                "defecto para los PDF." % malos))
+        else:
+            self.mensajes.put(("fin", "✔ %d mandados a la impresora" % ok))
 
 
 def main():
