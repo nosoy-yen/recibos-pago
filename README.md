@@ -16,11 +16,16 @@ cédula en el nombre, y con un botón manda todos los correos.
 ## Qué necesita la computadora
 
 Funciona en Windows 7, 10 y 11 (32 o 64 bits). Una PC con i5 y 8 GB de RAM va
-de sobra.
+de sobra. Hay dos formas de usarlo:
 
-1. Instalar **Python 3** desde <https://www.python.org/downloads/windows/>
-   (en el instalador marcar *Add python.exe to PATH*).
-2. Nada más. El programa usa solo lo que viene incluido con Python.
+**A) Con el `.exe` (lo más fácil, no se instala nada).** Se compila una vez
+—ver [Hacer el .exe](#hacer-el-exe-recomendado)— y en la computadora donde se
+va a usar es solo copiar la carpeta y doble clic en `Recibos.exe`.
+
+**B) Con Python.** Instalar **Python 3** desde
+<https://www.python.org/downloads/windows/> marcando *Add python.exe to PATH*,
+y abrir con `Recibos.bat`. No hace falta nada más: el programa usa solo lo que
+viene incluido con Python.
 
 Para extraer los RAR desde el programa hace falta tener **WinRAR** o **7-Zip**
 instalado. Si no está ninguno, se extrae el RAR a mano (clic derecho > Extraer
@@ -88,18 +93,34 @@ hay que escribirla cada vez que se abre el programa.
 GitHub: ya están en el `.gitignore`. Son nombres, cédulas, correos y
 contraseñas de gente real.
 
-## Hacer un .exe (opcional)
+## Hacer el .exe (recomendado)
 
-Si en la computadora del trabajo no se puede instalar Python, se arma un
-ejecutable en cualquier PC con Python y se copia la carpeta:
+Es la forma de que en la computadora donde se va a usar **no haya que
+instalar nada**, ni Python. Se compila una vez en cualquier PC con Python y
+se copia el `.exe` por pendrive. Doble clic en `hacer-exe.bat`, o a mano:
 
 ```bash
 pip install pyinstaller
-pyinstaller --noconsole --onefile --name Recibos recibos.py
+pyinstaller --noconsole --onefile --clean --name Recibos recibos.py
 ```
 
-El `.exe` queda en `dist\`. Al lado de él se crean solos `empleados.csv` y
-`config.json`.
+Queda `dist\Recibos.exe`, un solo archivo de unos 11 MB. Al lado de él se
+crean solos `empleados.csv` y `config.json`, así que conviene dejarlo en una
+carpeta propia y no en el Escritorio suelto.
+
+Dos cosas normales del `.exe`:
+
+- **Tarda unos segundos en abrir.** Con `--onefile` se descomprime en memoria
+  cada vez que arranca: medido, 4 segundos en una laptop actual, y más en una
+  PC vieja con disco mecánico. Después de la primera vez va más rápido porque
+  Windows lo deja en caché.
+- **SmartScreen avisa "Windows protegió tu PC"** porque el `.exe` no está
+  firmado. Se le da a *Más información > Ejecutar de todas formas*. Pasa una
+  vez. Si el antivirus del trabajo lo bloquea del todo, no queda otra que
+  instalar Python y usar `Recibos.bat`.
+
+El `.exe` no se sube a GitHub (`dist/` está en el `.gitignore`): el repo es
+para el código, el ejecutable se pasa por pendrive.
 
 ## ¿Y por WhatsApp?
 
