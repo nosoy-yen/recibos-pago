@@ -195,6 +195,11 @@ dos caminos y ninguno sirve bien para esto:
 Si algún día se quiere, lo correcto es la Cloud API. Por ahora el correo hace
 el trabajo y no tiene riesgo de bloqueo.
 
+## Privacidad
+
+El programa solo pide permiso para enviar correos y todo queda en la computadora
+donde se usa. Ver [PRIVACY.md](PRIVACY.md).
+
 ## Licencia
 
 MIT. Ver [LICENSE](LICENSE).
