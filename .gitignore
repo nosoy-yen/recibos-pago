@@ -1,0 +1,14 @@
+# Datos reales: NO se suben a GitHub
+empleados.csv
+config.json
+envios.log
+recibos/
+*.rar
+*.pdf
+
+# Python
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
