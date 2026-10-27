@@ -8,7 +8,11 @@ Los recibos llegan en un RAR con archivos nombrados por cédula
 cédula y el correo de cada persona, busca en la carpeta el PDF que lleve esa
 cédula en el nombre, y con un botón manda todos los correos.
 
-- No hay que instalar librerías: solo Python.
+- Para enviar se inicia sesión con Gmail, como en cualquier página. Para
+  Outlook, Yahoo u otros se usa una contraseña de aplicación.
+- Si en la carpeta quedan recibos de meses anteriores, a cada persona se le
+  envía solo el más nuevo.
+- No hay que instalar librerías: solo Python, o ni eso con el `.exe`.
 - Los datos quedan en archivos sencillos (`empleados.csv`, `config.json`) al
   lado del programa.
 - También imprime los recibos marcados de un solo golpe.
@@ -37,12 +41,16 @@ aquí) y listo, el programa igual funciona.
 2. **Carpeta con los recibos**: dar a *Importar RAR...* y elegir el RAR que se
    descargó, o dar a *Elegir carpeta...* si ya se extrajo a mano. Esa carpeta
    queda guardada; la próxima vez solo se mete el RAR nuevo.
-3. **Correo de quien envía**: poner el correo y la *contraseña de aplicación*
-   (ver abajo). Dar a *Probar conexión* para confirmar que entra.
+3. **Correo de quien envía**: dar a *Iniciar sesión con Gmail*, elegir la
+   cuenta en el navegador y aceptar. Queda conectado; arriba dice
+   *Conectado como ...*. Si el correo no es Gmail, usar la parte de abajo con
+   la [contraseña de aplicación](#contraseña-de-aplicación).
 4. **Trabajadores**: cargar la lista una sola vez, con *Agregar* o con
    *Abrir lista en Excel* para pegar muchos de golpe. Queda guardada.
 5. La columna **Recibo** dice quién tiene su PDF (`listo`) y quién no
-   (`sin recibo`, en rojo).
+   (`sin recibo`, en rojo). Si una persona tiene varios PDF en la carpeta
+   (por ejemplo del mes pasado), sale `listo (+1 viejos)` y se usa solo el
+   más nuevo, según la fecha del archivo.
 6. Marcar con un clic en la primera columna, o dar a *Marcar todos* /
    *Solo los que tienen recibo*.
 7. **Enviar correos a los marcados**. En el *Registro* de abajo se ve cuál
@@ -68,10 +76,48 @@ como `empleados.csv` y cambiar los datos, o cargarlos desde el programa.
 La cédula se compara solo por los números, así que da igual escribirla
 `12.345.678`, `V-12345678` o `12345678`.
 
+## Iniciar sesión con Gmail
+
+El botón usa el inicio de sesión oficial de Google (OAuth). El programa solo
+pide permiso para **enviar** correos, nunca para leerlos, y no ve la
+contraseña de la cuenta. La sesión queda guardada en `sesion_gmail.json` y
+*Cerrar sesión* la borra y le quita el permiso al programa.
+
+### Configurarlo (una sola vez, lo hace quien compila el programa)
+
+Google exige que cada programa tenga su propio "proyecto". Es gratis y toma
+unos 10 minutos:
+
+1. Entrar a <https://console.cloud.google.com> con tu cuenta de Google.
+   Arriba, *Seleccionar proyecto > Proyecto nuevo*, nombre `Recibos de Pago`,
+   *Crear*.
+2. Menú > *APIs y servicios > Biblioteca*, buscar **Gmail API** y darle a
+   *Habilitar*.
+3. Menú > *Google Auth Platform* (o *Pantalla de consentimiento de OAuth*) >
+   *Comenzar*. Nombre de la app `Recibos de Pago`, tu correo de asistencia,
+   público **Externo**, tu correo de contacto, aceptar y *Crear*.
+4. En *Público*, darle a **Publicar app**. Si se deja en modo *Prueba*,
+   Google cierra la sesión cada 7 días y hay que volver a entrar.
+5. En *Clientes > Crear cliente*, tipo de aplicación **App de escritorio**,
+   nombre `Recibos`, *Crear* y **Descargar JSON**.
+6. Poner ese archivo (`client_secret_....json`) en la carpeta del proyecto, al
+   lado de `recibos.py`. No hace falta cambiarle el nombre.
+7. Doble clic en `hacer-exe.bat`. El `.exe` nuevo lleva ese archivo adentro y
+   el botón ya funciona.
+
+Al iniciar sesión, Google muestra **"Google no verificó esta app"**. Es
+normal: la verificación es para apps con miles de usuarios. Se le da a
+*Configuración avanzada > Ir a Recibos de Pago*. Así la pueden usar hasta 100
+cuentas, de sobra para esto.
+
+El `client_secret` no se sube a GitHub (está en el `.gitignore`): quien use
+este código hace su propio proyecto de Google.
+
 ## Contraseña de aplicación
 
-Gmail, Outlook y Yahoo ya no dejan que un programa entre con la contraseña
-normal. Hay que generar una contraseña aparte, solo para este programa:
+Para Outlook, Yahoo, un correo de empresa, o Gmail sin el botón. Estos
+servicios ya no dejan que un programa entre con la contraseña normal. Hay que
+generar una contraseña aparte, solo para este programa:
 
 - **Gmail**: activar la verificación en dos pasos y luego crear una contraseña
   de aplicación en <https://myaccount.google.com/apppasswords>. Son 16 letras.
@@ -89,24 +135,21 @@ hay que escribirla cada vez que se abre el programa.
 
 ## Cuidado con los datos
 
-`empleados.csv`, `config.json`, `envios.log` y los PDF **no** se suben a
-GitHub: ya están en el `.gitignore`. Son nombres, cédulas, correos y
-contraseñas de gente real.
+`empleados.csv`, `config.json`, `envios.log`, `sesion_gmail.json`,
+`client_secret*.json` y los PDF **no** se suben a GitHub: ya están en el
+`.gitignore`. Son nombres, cédulas, correos y accesos de gente real.
 
 ## Hacer el .exe (recomendado)
 
 Es la forma de que en la computadora donde se va a usar **no haya que
 instalar nada**, ni Python. Se compila una vez en cualquier PC con Python y
-se copia el `.exe` por pendrive. Doble clic en `hacer-exe.bat`, o a mano:
-
-```bash
-pip install pyinstaller
-pyinstaller --noconsole --onefile --clean --name Recibos recibos.py
-```
+se copia el `.exe` por pendrive. Doble clic en **`hacer-exe.bat`**: instala
+PyInstaller, y si encuentra el `client_secret` de Google lo mete dentro del
+`.exe` para que funcione *Iniciar sesión con Gmail*.
 
 Queda `dist\Recibos.exe`, un solo archivo de unos 11 MB. Al lado de él se
-crean solos `empleados.csv` y `config.json`, así que conviene dejarlo en una
-carpeta propia y no en el Escritorio suelto.
+crean solos `empleados.csv`, `config.json` y `sesion_gmail.json`, así que
+conviene dejarlo en una carpeta propia y no en el Escritorio suelto.
 
 Dos cosas normales del `.exe`:
 

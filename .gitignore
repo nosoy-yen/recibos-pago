@@ -15,3 +15,10 @@ dist/
 
 # Carpeta lista para el pendrive (contiene el .exe)
 para-pendrive/
+
+# PDF falsos para probar
+prueba-local/
+
+# Inicio de sesion con Gmail: credenciales de Google y sesion guardada
+client_secret*.json
+sesion_gmail.json
