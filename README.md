@@ -59,13 +59,13 @@ demás está en **⚙ Configuración**.
 **Cada mes:**
 
 1. Copiar el RAR de los recibos en la carpeta. El programa se da cuenta solo
-   en unos segundos y lo abre en una subcarpeta con su nombre y la fecha, así
-   que el del mes siguiente se abre aunque se llame igual. Lo que hay en la
-   carpeta se ve en el cuadro de la izquierda.
-2. Cada persona tiene una casilla: **verde** si su recibo está, **roja** si
-   no hay ningún PDF con su cédula. Si una persona tiene varios PDF (por
-   ejemplo el de este mes y el del pasado), se usa el más nuevo según la fecha
-   del archivo.
+   en unos segundos y lo abre en una subcarpeta con su nombre y la fecha.
+2. A la izquierda cada RAR sale como una **nómina** con su casilla, y con un
+   **+** para ver sus recibos. Al llegar un RAR nuevo queda marcada solo esa
+   nómina, para no mezclarla con las de otros días; se pueden marcar varias o
+   **Todas las nóminas**. En el medio salen solo las personas con recibo en
+   las nóminas marcadas (a cada una le toca un recibo por nómina). Si hay PDF
+   cuya cédula no está en la lista, abajo sale un aviso.
 3. Marcar las casillas, o **Seleccionar todos** (marca solo a los que tienen
    recibo).
 4. **Enviar**. En la columna *Estado* cada persona pasa a *➜ Enviando...* y

@@ -149,17 +149,16 @@ def solo_digitos(texto):
     return re.sub(r"\D", "", texto or "")
 
 
-def indexar_recibos(carpeta):
+def numeros_del_nombre(pdf):
+    # Cualquier grupo de 5 digitos o mas del nombre se toma como cedula.
+    return set(re.findall(r"\d{5,}", pdf.stem))
+
+
+def indexar_pdfs(pdfs):
     """Devuelve {numero_de_cedula: [rutas de pdf]} a partir de los nombres."""
     indice = {}
-    if not carpeta:
-        return indice
-    ruta = Path(carpeta)
-    if not ruta.is_dir():
-        return indice
-    for pdf in sorted(ruta.rglob("*.pdf")):
-        # Cualquier grupo de 5 digitos o mas del nombre se toma como cedula.
-        for numero in set(re.findall(r"\d{5,}", pdf.stem)):
+    for pdf in pdfs:
+        for numero in numeros_del_nombre(pdf):
             indice.setdefault(numero, []).append(pdf)
     return indice
 
@@ -171,17 +170,62 @@ def _fecha(ruta):
         return 0
 
 
-def emparejar(lista, indice):
+def agrupar_nominas(carpeta):
+    """Cada RAR abierto (una subcarpeta) es una nomina; los PDF sueltos en la
+    carpeta son otra. Devuelve [(clave, nombre, fecha, [pdfs])], la mas nueva
+    primero."""
+    ruta = Path(carpeta) if carpeta else None
+    if not ruta or not ruta.is_dir():
+        return []
+    grupos = {}
+    try:
+        for pdf in ruta.rglob("*.pdf"):
+            partes = pdf.relative_to(ruta).parts
+            if any(p.endswith(".abriendo") for p in partes[:-1]):
+                continue  # un RAR que se esta abriendo en este momento
+            grupos.setdefault(partes[0] if len(partes) > 1 else "", []).append(pdf)
+    except OSError:
+        return []
+    nominas = []
+    for clave, pdfs in grupos.items():
+        # "recibos (2026-10-29 10.15)" es como extraer_rars_nuevos nombra lo que abre
+        m = re.match(r"^(.*) \((\d{4}-\d{2}-\d{2} \d{2}\.\d{2})\)$", clave)
+        if m:
+            fecha = time.mktime(time.strptime(m.group(2), "%Y-%m-%d %H.%M"))
+            nombre = "%s  ·  %s" % (m.group(1), time.strftime("%d/%m %H:%M",
+                                                              time.localtime(fecha)))
+        elif clave:
+            nombre, fecha = clave, _fecha(ruta / clave)
+        else:
+            nombre, fecha = "Sueltos en la carpeta", max(_fecha(p) for p in pdfs)
+        nominas.append((clave, nombre, fecha, sorted(pdfs, key=lambda p: p.name)))
+    nominas.sort(key=lambda n: n[2], reverse=True)
+    return nominas
+
+
+def emparejar(lista, nominas):
+    """A cada persona le toca un recibo por cada nomina elegida (si en una misma
+    nomina hay varios con su cedula, el mas nuevo)."""
+    indices = [indexar_pdfs(pdfs) for pdfs in nominas]
     for e in lista:
         cedula = solo_digitos(e["cedula"])
-        encontrados = indice.get(cedula, []) if cedula else []
-        # Si quedaron recibos de meses anteriores, se usa solo el mas nuevo.
-        nuevo = sorted(encontrados, key=lambda p: (_fecha(p), p.name))[-1:]
+        nuevo = []
+        if cedula:
+            for indice in indices:
+                nuevo += sorted(indice.get(cedula, []),
+                                key=lambda p: (_fecha(p), p.name))[-1:]
         if nuevo != e.get("pdfs"):
             e["estado"] = ""  # recibo distinto: todavia no se ha enviado
             if not nuevo:
                 e["marcado"] = False
         e["pdfs"] = nuevo
+
+
+def recibos_sin_persona(lista, nominas):
+    """PDF de las nominas elegidas cuya cedula no esta en la lista."""
+    cedulas = {solo_digitos(e["cedula"]) for e in lista}
+    return [pdf for pdfs in nominas for pdf in pdfs
+            if not numeros_del_nombre(pdf) & cedulas]
 
 
 def buscar_descompresor():
@@ -226,6 +270,58 @@ def extraer(archivo, destino):
     if r.returncode != 0:
         return (r.stderr or r.stdout or "codigo %s" % r.returncode).strip()
     return None
+
+
+def buscar_lector():
+    """Un programa que sepa imprimir PDF sin preguntar. Edge (el de Windows por
+    defecto) no deja: por eso el .exe puede traer SumatraPDF adentro."""
+    lugares = [BASE / "SumatraPDF.exe"]
+    if hasattr(sys, "_MEIPASS"):  # dentro del .exe
+        lugares.append(Path(sys._MEIPASS) / "SumatraPDF.exe")
+    programas = [os.environ.get("ProgramFiles", r"C:\Program Files"),
+                 os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")]
+    lugares += [Path(os.environ.get("LOCALAPPDATA", "")) / "SumatraPDF" / "SumatraPDF.exe"]
+    for raiz in programas:
+        lugares += [Path(raiz) / "SumatraPDF" / "SumatraPDF.exe",
+                    Path(raiz) / "Adobe" / "Acrobat DC" / "Acrobat" / "Acrobat.exe",
+                    Path(raiz) / "Adobe" / "Acrobat Reader DC" / "Reader" / "AcroRd32.exe",
+                    Path(raiz) / "Adobe" / "Acrobat Reader" / "Reader" / "AcroRd32.exe"]
+    for ruta in lugares:
+        if ruta.is_file():
+            return ruta
+    return None
+
+
+def windows_imprime_pdf():
+    """Si el programa que Windows usa para los PDF sabe imprimir (Edge no)."""
+    try:
+        import winreg
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Explorer"
+                                r"\FileExts\.pdf\UserChoice") as k:
+                progid = winreg.QueryValueEx(k, "ProgId")[0]
+        except OSError:
+            progid = winreg.QueryValue(winreg.HKEY_CLASSES_ROOT, ".pdf")
+        winreg.OpenKey(winreg.HKEY_CLASSES_ROOT, progid + r"\shell\print\command").Close()
+        return True
+    except (OSError, ImportError):
+        return False
+
+
+def imprimir_pdf(pdf):
+    """Manda un PDF a la impresora por defecto de Windows."""
+    lector = buscar_lector()
+    sin_ventana = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if lector and lector.name.lower() == "sumatrapdf.exe":
+        r = subprocess.run([str(lector), "-print-to-default", "-silent", str(pdf)],
+                           timeout=180, creationflags=sin_ventana)
+        if r.returncode != 0:
+            raise RuntimeError("SumatraPDF no pudo imprimir (codigo %s)" % r.returncode)
+    elif lector:  # Adobe: /t imprime en la impresora por defecto
+        subprocess.Popen([str(lector), "/n", "/t", str(pdf)])
+    else:
+        os.startfile(str(pdf), "print")
 
 
 COMPRIMIDOS = (".rar", ".zip", ".7z")
@@ -589,6 +685,12 @@ class App(tk.Tk):
         self.var_marcados = tk.StringVar()
         self.var_progreso = tk.StringVar()
         self.var_todos = tk.BooleanVar()
+        self.var_todas = tk.BooleanVar()
+        self.var_ver_todos = tk.BooleanVar()
+        self.var_sin_persona = tk.StringVar()
+        self.nominas = []                 # [(clave, nombre, fecha, [pdfs])]
+        self.nominas_marcadas = set()     # claves
+        self.nominas_conocidas = None     # para darse cuenta de un RAR nuevo
 
         self._construir()
         self.pintar_cuenta()
@@ -625,18 +727,26 @@ class App(tk.Tk):
         ttk.Label(arriba, textvariable=self.var_carpeta_corta,
                   style="Gris.TLabel").pack(side="left", padx=10)
 
-        # --- izquierda: lo que hay en la carpeta
+        # --- izquierda: las nominas (un RAR = una nomina), con su casilla
         izq = ttk.Frame(raiz)
         izq.grid(row=1, column=0, sticky="ns", padx=(0, 14))
         izq.rowconfigure(1, weight=1)
-        ttk.Label(izq, text="En la carpeta").grid(row=0, column=0, sticky="w", pady=(0, 4))
-        self.lst_archivos = tk.Listbox(izq, width=29, activestyle="none", relief="solid",
-                                       borderwidth=1, highlightthickness=0,
-                                       font=("Segoe UI", 9))
-        self.lst_archivos.grid(row=1, column=0, sticky="ns")
-        barra_izq = ttk.Scrollbar(izq, orient="vertical", command=self.lst_archivos.yview)
+        ttk.Checkbutton(izq, text="Todas las nóminas", variable=self.var_todas,
+                        command=self.marcar_todas_nominas).grid(row=0, column=0, sticky="w",
+                                                                pady=(0, 4))
+        self.arbol = ttk.Treeview(izq, show="tree", selectmode="none")
+        self.arbol.column("#0", width=245, minwidth=200)
+        self.arbol.tag_configure("archivo", foreground=GRIS)
+        self.arbol.tag_configure("vacio", foreground=GRIS)
+        self.arbol.grid(row=1, column=0, sticky="ns")
+        barra_izq = ttk.Scrollbar(izq, orient="vertical", command=self.arbol.yview)
         barra_izq.grid(row=1, column=1, sticky="ns")
-        self.lst_archivos.configure(yscrollcommand=barra_izq.set)
+        self.arbol.configure(yscrollcommand=barra_izq.set)
+        self.arbol.bind("<Button-1>", self.clic_nomina)
+        ttk.Label(izq, style="Gris.TLabel", wraplength=245, justify="left",
+                  text="Marca la nómina que vas a enviar. El + muestra sus "
+                       "recibos.").grid(row=2, column=0, columnspan=2, sticky="w",
+                                         pady=(6, 0))
 
         # --- centro: la gente
         centro = ttk.Frame(raiz)
@@ -670,8 +780,11 @@ class App(tk.Tk):
         pie = ttk.Frame(centro)
         pie.grid(row=2, column=0, sticky="ew", pady=(8, 0))
         ttk.Button(pie, text="+ Agregar persona", command=self.agregar).pack(side="left")
-        ttk.Label(pie, text="Doble clic en una persona para corregirla.",
-                  style="Gris.TLabel").pack(side="left", padx=10)
+        ttk.Checkbutton(pie, text="Ver también a los que no tienen recibo",
+                        variable=self.var_ver_todos,
+                        command=self.pintar_tabla).pack(side="left", padx=12)
+        ttk.Label(pie, textvariable=self.var_sin_persona,
+                  foreground="#b26a00").pack(side="right")
 
         self.menu = tk.Menu(self, tearoff=0)
         self.menu.add_command(label="Corregir", command=self.editar)
@@ -809,15 +922,22 @@ class App(tk.Tk):
                     self.configure(cursor="")
                 for nombre in abiertos:
                     self.log("Abierto %s" % nombre)
-            indice = indexar_recibos(carpeta)
-            emparejar(self.empleados, indice)
+            self.nominas = agrupar_nominas(carpeta)
+            claves = [n[0] for n in self.nominas]
+            nuevas = [c for c in claves if c not in (self.nominas_conocidas or ())]
+            if nuevas or self.nominas_conocidas is None:
+                # Al abrir el programa o al llegar un RAR nuevo queda marcada
+                # solo la nomina mas nueva, para no mezclar con las anteriores.
+                self.nominas_marcadas = set(nuevas[:1] or claves[:1])
+            self.nominas_marcadas &= set(claves)
+            self.nominas_conocidas = set(claves)
             self.firma = firma_carpeta(carpeta)
-            self.pintar_archivos(carpeta)
-            self.pintar_tabla()
+            self.pintar_nominas(carpeta)
+            self._aplicar_nominas()
             for nombre, error in errores:
                 self.log("No se pudo abrir %s: %s" % (nombre, error))
                 messagebox.showerror("Recibos", "No se pudo abrir %s\n\n%s" % (nombre, error))
-            if (avisar and self.empleados and indice
+            if (avisar and self.empleados and self.nominas
                     and not any(e["pdfs"] for e in self.empleados)):
                 messagebox.showwarning(
                     "Recibos",
@@ -826,38 +946,71 @@ class App(tk.Tk):
         finally:
             self.refrescando = False
 
-    def pintar_archivos(self, carpeta):
+    # ---- nominas (cada RAR)
+
+    def pintar_nominas(self, carpeta):
         # arriba se ve solo el final de la ruta, si es muy larga
         partes = Path(carpeta).parts if carpeta else ()
         corta = carpeta if len(carpeta) <= 45 else os.path.join("...", *partes[-2:])
         self.var_carpeta_corta.set(corta)
-        lista = self.lst_archivos
-        lista.delete(0, "end")
+        abiertas = {i for i in self.arbol.get_children() if self.arbol.item(i, "open")}
+        self.arbol.delete(*self.arbol.get_children())
         if not carpeta or not os.path.isdir(carpeta):
-            lista.insert("end", "  Dale a Elegir carpeta.")
+            self.arbol.insert("", "end", text="Dale a Elegir carpeta.", tags=("vacio",))
+        elif not self.nominas:
+            self.arbol.insert("", "end", text="Todavía no hay recibos.", tags=("vacio",))
+            self.arbol.insert("", "end", text="Copia aquí el RAR.", tags=("vacio",))
+        for clave, nombre, _, pdfs in self.nominas:
+            iid = "n:" + clave
+            casilla = "marcado" if clave in self.nominas_marcadas else "libre"
+            self.arbol.insert("", "end", iid=iid, image=self.img[casilla],
+                              text=" %s  (%d)" % (nombre, len(pdfs)), open=iid in abiertas)
+            for pdf in pdfs:
+                self.arbol.insert(iid, "end", text=pdf.name, tags=("archivo",))
+        self.var_todas.set(bool(self.nominas)
+                           and len(self.nominas_marcadas) == len(self.nominas))
+
+    def clic_nomina(self, evento):
+        fila = self.arbol.identify_row(evento.y)
+        if not fila.startswith("n:"):
+            return "break"
+        if "indicator" in self.arbol.identify_element(evento.x, evento.y):
+            return None  # la flechita: que abra o cierre la lista de recibos
+        if self.trabajando:
+            return "break"
+        self.nominas_marcadas ^= {fila[2:]}
+        self._cambio_de_nominas()
+        return "break"
+
+    def marcar_todas_nominas(self):
+        if self.trabajando:
+            self.var_todas.set(not self.var_todas.get())
             return
-        ruta = Path(carpeta)
-        try:
-            comprimidos = sorted(p.name for p in ruta.iterdir()
-                                 if p.is_file() and p.suffix.lower() in COMPRIMIDOS)
-            pdfs = sorted(p.name for p in ruta.rglob("*.pdf"))
-        except OSError:
-            comprimidos, pdfs = [], []
-        for nombre in comprimidos:
-            lista.insert("end", "  " + nombre)
-            lista.itemconfig("end", foreground=AZUL)
-        if pdfs:
-            lista.insert("end", "  %d recibos:" % len(pdfs))
-            lista.itemconfig("end", foreground=GRIS)
-            for nombre in pdfs:
-                lista.insert("end", "  " + nombre)
-        if not comprimidos and not pdfs:
-            lista.insert("end", "  Todavía no hay recibos.")
-            lista.insert("end", "  Copia aquí el RAR.")
+        self.nominas_marcadas = ({n[0] for n in self.nominas}
+                                 if self.var_todas.get() else set())
+        self._cambio_de_nominas()
+
+    def _cambio_de_nominas(self):
+        for e in self.empleados:
+            e["marcado"] = False  # se vuelve a elegir a quien enviar
+        self.pintar_nominas(self.var_carpeta.get().strip())
+        self._aplicar_nominas()
+
+    def _aplicar_nominas(self):
+        elegidas = [n[3] for n in self.nominas if n[0] in self.nominas_marcadas]
+        emparejar(self.empleados, elegidas)
+        sueltos = recibos_sin_persona(self.empleados, elegidas)
+        self.var_sin_persona.set(
+            "⚠ %d recibo%s sin persona en la lista" % (len(sueltos), "s" * (len(sueltos) > 1))
+            if sueltos else "")
+        self.pintar_tabla()
 
     # ---- tabla
 
-    def pintar_fila(self, i):
+    def pintar_fila(self, i, nueva=False):
+        iid = str(i)
+        if not nueva and not self.tree.exists(iid):
+            return  # esa persona no se esta mostrando
         e = self.empleados[i]
         if not e["pdfs"]:
             casilla, texto, color = "falta", "Sin recibo", "falta"
@@ -871,17 +1024,19 @@ class App(tk.Tk):
                 texto, color = "Listo", ""
         datos = {"image": self.img[casilla], "tags": (color,) if color else (),
                  "values": (e["nombre"], e["cedula"], e["correo"], texto)}
-        iid = str(i)
         if self.tree.exists(iid):
             self.tree.item(iid, **datos)
         else:
             self.tree.insert("", "end", iid=iid, **datos)
 
     def pintar_tabla(self):
+        # Se ve solo la gente con recibo en las nominas marcadas, salvo que se
+        # pida ver a todos.
         seleccion = self.tree.selection()
         self.tree.delete(*self.tree.get_children())
-        for i in range(len(self.empleados)):
-            self.pintar_fila(i)
+        for i, e in enumerate(self.empleados):
+            if e["pdfs"] or self.var_ver_todos.get():
+                self.pintar_fila(i, nueva=True)
         for iid in seleccion:
             if self.tree.exists(iid):
                 self.tree.selection_set(iid)
@@ -932,8 +1087,11 @@ class App(tk.Tk):
             self.menu.tk_popup(evento.x_root, evento.y_root)
 
     def _reemparejar(self):
-        emparejar(self.empleados, indexar_recibos(self.var_carpeta.get().strip()))
-        self.pintar_tabla()
+        self._aplicar_nominas()
+
+    def _nombres_marcadas(self):
+        return "\n".join("   • " + n[1] for n in self.nominas
+                         if n[0] in self.nominas_marcadas)
 
     def agregar(self):
         if self.trabajando:
@@ -944,7 +1102,8 @@ class App(tk.Tk):
             self.empleados.append(datos)
             guardar_empleados(self.empleados)
             self._reemparejar()
-            self.tree.see(str(len(self.empleados) - 1))
+            if self.tree.exists(str(len(self.empleados) - 1)):
+                self.tree.see(str(len(self.empleados) - 1))
 
     def editar(self):
         seleccion = self.tree.selection()
@@ -1245,7 +1404,8 @@ class App(tk.Tk):
         if not listos:
             messagebox.showwarning("Recibos", "Ninguno de los seleccionados tiene correo.")
             return
-        aviso = "Se van a enviar %d recibos desde\n%s" % (len(listos), remitente)
+        aviso = "Se van a enviar %d recibos de:\n%s\n\ndesde %s" % (
+            len(listos), self._nombres_marcadas(), remitente)
         if sin_correo:
             aviso += "\n\nNo tienen correo y se saltan: %s" % ", ".join(sin_correo[:8])
         if not messagebox.askyesno("Recibos", aviso + "\n\n¿Enviar?"):
@@ -1346,6 +1506,14 @@ class App(tk.Tk):
             messagebox.showinfo("Recibos", "No hay nadie seleccionado.\n\nMarca las "
                                 "casillas verdes, o dale a Seleccionar todos.")
             return
+        if not buscar_lector() and not windows_imprime_pdf():
+            messagebox.showwarning(
+                "Recibos",
+                "Esta computadora no tiene un programa que pueda imprimir los PDF "
+                "solos: Windows los abre con Edge, y Edge no lo permite.\n\n"
+                "Instala SumatraPDF (gratis, sumatrapdfreader.org) o Adobe Reader "
+                "y vuelve a intentarlo.")
+            return
         if not messagebox.askyesno(
                 "Recibos",
                 "Se van a imprimir %d recibos en la impresora que Windows tiene "
@@ -1362,7 +1530,7 @@ class App(tk.Tk):
                                             "Imprimiendo %d de %d..." % (n, total))))
             try:
                 for pdf in emp["pdfs"]:
-                    os.startfile(str(pdf), "print")
+                    imprimir_pdf(pdf)
                 ok += 1
                 self.mensajes.put(("fila", (i, "impreso")))
                 self.mensajes.put(("log", "Impreso: %s" % emp["nombre"]))
@@ -1374,11 +1542,9 @@ class App(tk.Tk):
         self.mensajes.put(("progreso", (total, total, "")))
         if malos:
             self.mensajes.put(("fin", "✔ %d impresos\n✖ %d no se imprimieron" % (ok, malos)))
-            self.mensajes.put((
-                "error",
-                "No se pudieron imprimir %d recibos.\n\nSi no sale nada, abre un PDF con "
-                "clic derecho > Abrir con > Adobe Reader, y ponlo como programa por "
-                "defecto para los PDF." % malos))
+            self.mensajes.put(("error", "No se pudieron imprimir %d recibos.\n\nRevisa "
+                               "que la impresora esté prendida y sea la que Windows "
+                               "tiene por defecto." % malos))
         else:
             self.mensajes.put(("fin", "✔ %d mandados a la impresora" % ok))
 
