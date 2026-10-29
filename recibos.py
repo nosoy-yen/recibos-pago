@@ -30,6 +30,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 import tkinter as tk
 import urllib.error
 import urllib.parse
@@ -617,8 +618,11 @@ def pedir_datos(padre, titulo, datos=None):
 # ---------------------------------------------------------------- programa
 
 VERDE = "#2e9d4f"
+VERDE_OSCURO = "#23803f"
 ROJO = "#d64545"
 AZUL = "#1a5fb4"
+AZUL_MEDIO = "#2c6aa0"
+AZUL_OSCURO = "#1f4e79"
 GRIS = "#777777"
 
 # estado de cada persona: (texto en la tabla, color)
@@ -629,6 +633,23 @@ ESTADOS = {
     "fallo": ("✖ No se envió", "fallo"),
     "noimpreso": ("✖ No se imprimió", "fallo"),
 }
+
+
+def normalizar(texto):
+    """Minusculas y sin tildes, para buscar 'ramon' y encontrar 'Ramón'."""
+    texto = unicodedata.normalize("NFD", texto or "")
+    return "".join(c for c in texto if unicodedata.category(c) != "Mn").lower()
+
+
+def _lupa():
+    """Lupita de 16x16 para los buscadores."""
+    img = tk.PhotoImage(width=16, height=16)
+    for y in range(16):
+        for x in range(16):
+            d = ((x - 6.5) ** 2 + (y - 6.5) ** 2) ** 0.5
+            if 3.6 <= d <= 5.4 or (x >= 10 and y >= 10 and abs(x - y) <= 1 and x <= 14):
+                img.put(GRIS, to=(x, y, x + 1, y + 1))
+    return img
 
 
 def _casilla(fondo, borde, palomita=None):
@@ -649,9 +670,9 @@ class App(tk.Tk):
         super().__init__()
         self.title("Recibos de Pago")
         # Que quepa arriba de la barra de tareas en pantallas chicas (768 px).
-        alto = min(580, self.winfo_screenheight() - 100)
-        self.geometry("1040x%d+20+10" % alto)
-        self.minsize(880, 420)
+        alto = min(640, self.winfo_screenheight() - 100)
+        self.geometry("1060x%d+20+10" % alto)
+        self.minsize(900, 480)
 
         self.config_datos = cargar_config()
         self.empleados = cargar_empleados()
@@ -670,6 +691,7 @@ class App(tk.Tk):
             "libre": _casilla("white", VERDE),
             "marcado": _casilla(VERDE, VERDE, "white"),
             "falta": _casilla("#fbe3e3", ROJO),
+            "lupa": _lupa(),
         }
         c = self.config_datos
         self.var_carpeta = tk.StringVar(value=c["carpeta"])
@@ -685,6 +707,10 @@ class App(tk.Tk):
         self.var_marcados = tk.StringVar()
         self.var_progreso = tk.StringVar()
         self.var_todos = tk.BooleanVar()
+        self.var_total = tk.StringVar()
+        self.var_buscar_persona = tk.StringVar()
+        self.var_buscar_archivo = tk.StringVar()
+        self._ayudas = {}  # buscadores que muestran su texto de ayuda
         self.var_todas = tk.BooleanVar()
         self.var_ver_todos = tk.BooleanVar()
         self.var_sin_persona = tk.StringVar()
@@ -704,25 +730,36 @@ class App(tk.Tk):
     def _construir(self):
         estilo = ttk.Style()
         estilo.configure("Treeview", rowheight=26)
-        estilo.configure("Grande.TButton", font=("Segoe UI", 13, "bold"), padding=(10, 16))
         estilo.configure("Gris.TLabel", foreground=GRIS)
+        estilo.configure("Titulo.TLabel", foreground=AZUL_OSCURO, font=("Segoe UI", 11, "bold"))
+        estilo.configure("Total.TLabel", foreground=AZUL_OSCURO, font=("Segoe UI", 9, "bold"))
+        estilo.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"))
 
-        raiz = ttk.Frame(self, padding=14)
+        # --- barra de arriba (color), con el correo y la configuracion
+        barra = tk.Frame(self, bg=AZUL_OSCURO)
+        barra.pack(fill="x")
+        tk.Label(barra, text="  Recibos de Pago", bg=AZUL_OSCURO, fg="white",
+                 font=("Segoe UI", 14, "bold")).pack(side="left", pady=10)
+        self.btn_config = tk.Button(barra, text="⚙  Configuración", command=self.abrir_config,
+                                    bg=AZUL_MEDIO, fg="white", activebackground=AZUL,
+                                    activeforeground="white", relief="flat", bd=0,
+                                    padx=14, pady=5, cursor="hand2",
+                                    font=("Segoe UI", 10), disabledforeground="#9fb6cc")
+        self.btn_config.pack(side="right", padx=14)
+        self.lbl_cuenta = tk.Label(barra, textvariable=self.var_cuenta, bg=AZUL_OSCURO,
+                                   fg="#cfe0f1", font=("Segoe UI", 9))
+        self.lbl_cuenta.pack(side="right", padx=4)
+
+        raiz = ttk.Frame(self, padding=(14, 10, 14, 14))
         raiz.pack(fill="both", expand=True)
         raiz.columnconfigure(1, weight=1)
         raiz.rowconfigure(1, weight=1)
 
-        # --- arriba: carpeta y configuracion
-        # (lo de la derecha se empaca primero para que nunca quede tapado)
+        # --- carpeta
         arriba = ttk.Frame(raiz)
-        arriba.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 12))
+        arriba.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         ttk.Button(arriba, text="Elegir carpeta",
                    command=self.elegir_carpeta).pack(side="left")
-        self.btn_config = ttk.Button(arriba, text="⚙  Configuración",
-                                     command=self.abrir_config)
-        self.btn_config.pack(side="right")
-        ttk.Label(arriba, textvariable=self.var_cuenta,
-                  style="Gris.TLabel").pack(side="right", padx=12)
         self.var_carpeta_corta = tk.StringVar()
         ttk.Label(arriba, textvariable=self.var_carpeta_corta,
                   style="Gris.TLabel").pack(side="left", padx=10)
@@ -730,55 +767,70 @@ class App(tk.Tk):
         # --- izquierda: las nominas (un RAR = una nomina), con su casilla
         izq = ttk.Frame(raiz)
         izq.grid(row=1, column=0, sticky="ns", padx=(0, 14))
-        izq.rowconfigure(1, weight=1)
+        izq.rowconfigure(3, weight=1)
+        ttk.Label(izq, text="Nóminas", style="Titulo.TLabel").grid(row=0, column=0,
+                                                                   sticky="w")
+        self._buscador(izq, self.var_buscar_archivo, "Buscar recibo o persona",
+                       lambda: self.pintar_nominas(self.var_carpeta.get().strip())).grid(
+            row=1, column=0, columnspan=2, sticky="ew", pady=(4, 6))
         ttk.Checkbutton(izq, text="Todas las nóminas", variable=self.var_todas,
-                        command=self.marcar_todas_nominas).grid(row=0, column=0, sticky="w",
+                        command=self.marcar_todas_nominas).grid(row=2, column=0, sticky="w",
                                                                 pady=(0, 4))
         self.arbol = ttk.Treeview(izq, show="tree", selectmode="none")
         self.arbol.column("#0", width=245, minwidth=200)
         self.arbol.tag_configure("archivo", foreground=GRIS)
         self.arbol.tag_configure("vacio", foreground=GRIS)
-        self.arbol.grid(row=1, column=0, sticky="ns")
+        self.arbol.tag_configure("nomina", foreground=AZUL_OSCURO)
+        self.arbol.grid(row=3, column=0, sticky="ns")
         barra_izq = ttk.Scrollbar(izq, orient="vertical", command=self.arbol.yview)
-        barra_izq.grid(row=1, column=1, sticky="ns")
+        barra_izq.grid(row=3, column=1, sticky="ns")
         self.arbol.configure(yscrollcommand=barra_izq.set)
         self.arbol.bind("<Button-1>", self.clic_nomina)
         ttk.Label(izq, style="Gris.TLabel", wraplength=245, justify="left",
                   text="Marca la nómina que vas a enviar. El + muestra sus "
-                       "recibos.").grid(row=2, column=0, columnspan=2, sticky="w",
+                       "recibos.").grid(row=4, column=0, columnspan=2, sticky="w",
                                          pady=(6, 0))
 
         # --- centro: la gente
         centro = ttk.Frame(raiz)
         centro.grid(row=1, column=1, sticky="nsew")
         centro.columnconfigure(0, weight=1)
-        centro.rowconfigure(1, weight=1)
+        centro.rowconfigure(3, weight=1)
+        titulo = ttk.Frame(centro)
+        titulo.grid(row=0, column=0, columnspan=2, sticky="ew")
+        ttk.Label(titulo, text="Personas", style="Titulo.TLabel").pack(side="left")
+        ttk.Label(titulo, textvariable=self.var_total,
+                  style="Total.TLabel").pack(side="right")
+        self._buscador(centro, self.var_buscar_persona, "Buscar nombre, cédula o correo",
+                       self.pintar_tabla).grid(row=1, column=0, columnspan=2, sticky="ew",
+                                               pady=(4, 6))
         ttk.Checkbutton(centro, text="Seleccionar todos", variable=self.var_todos,
-                        command=self.marcar_todos).grid(row=0, column=0, sticky="w",
+                        command=self.marcar_todos).grid(row=2, column=0, sticky="w",
                                                         pady=(0, 4))
         self.tree = ttk.Treeview(centro, columns=("nombre", "cedula", "correo", "estado"),
                                  show="tree headings", selectmode="browse")
         self.tree.column("#0", width=42, minwidth=42, stretch=False, anchor="center")
-        for clave, titulo, ancho in (("nombre", "Nombre", 165), ("cedula", "Cédula", 85),
-                                     ("correo", "Correo", 175), ("estado", "Estado", 125)):
-            self.tree.heading(clave, text=titulo, anchor="w")
+        for clave, titulo_col, ancho in (("nombre", "Nombre", 165), ("cedula", "Cédula", 85),
+                                         ("correo", "Correo", 175), ("estado", "Estado", 125)):
+            self.tree.heading(clave, text=titulo_col, anchor="w")
             self.tree.column(clave, width=ancho, minwidth=60, anchor="w",
                              stretch=clave in ("nombre", "correo"))
+        self.tree.tag_configure("par", background="#f1f6fc")
         self.tree.tag_configure("falta", foreground=GRIS)
         self.tree.tag_configure("aviso", foreground="#b26a00")
         self.tree.tag_configure("enviando", foreground=AZUL)
         self.tree.tag_configure("hecho", foreground=VERDE)
         self.tree.tag_configure("fallo", foreground=ROJO)
-        self.tree.grid(row=1, column=0, sticky="nsew")
+        self.tree.grid(row=3, column=0, sticky="nsew")
         barra_tabla = ttk.Scrollbar(centro, orient="vertical", command=self.tree.yview)
-        barra_tabla.grid(row=1, column=1, sticky="ns")
+        barra_tabla.grid(row=3, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=barra_tabla.set)
         self.tree.bind("<Button-1>", self.clic_tabla)
         self.tree.bind("<Double-1>", self.doble_clic)
         self.tree.bind("<Button-3>", self.menu_tabla)
 
         pie = ttk.Frame(centro)
-        pie.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        pie.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         ttk.Button(pie, text="+ Agregar persona", command=self.agregar).pack(side="left")
         ttk.Checkbutton(pie, text="Ver también a los que no tienen recibo",
                         variable=self.var_ver_todos,
@@ -792,12 +844,12 @@ class App(tk.Tk):
 
         # --- derecha: enviar, imprimir y como va
         der = ttk.Frame(raiz)
-        der.grid(row=1, column=2, sticky="n", padx=(16, 0))
-        self.btn_enviar = ttk.Button(der, text="Enviar", style="Grande.TButton",
-                                     width=12, command=self.enviar)
+        der.grid(row=1, column=2, sticky="n", padx=(16, 0), pady=(26, 0))
+        self.btn_enviar = self._boton_grande(der, "✉  Enviar", VERDE, VERDE_OSCURO,
+                                             self.enviar)
         self.btn_enviar.pack(fill="x")
-        self.btn_imprimir = ttk.Button(der, text="Imprimir", style="Grande.TButton",
-                                       width=12, command=self.imprimir)
+        self.btn_imprimir = self._boton_grande(der, "Imprimir", AZUL, AZUL_MEDIO,
+                                               self.imprimir)
         self.btn_imprimir.pack(fill="x", pady=(12, 0))
         ttk.Label(der, textvariable=self.var_marcados,
                   style="Gris.TLabel").pack(pady=(12, 0))
@@ -805,6 +857,67 @@ class App(tk.Tk):
         self.barra.pack(fill="x", pady=(18, 6))
         ttk.Label(der, textvariable=self.var_progreso, wraplength=180,
                   justify="center").pack()
+
+    def _boton_grande(self, padre, texto, color, color_encima, comando):
+        boton = tk.Button(padre, text=texto, command=comando, bg=color, fg="white",
+                          activebackground=color_encima, activeforeground="white",
+                          disabledforeground="#e3e3e3", relief="flat", bd=0, width=13,
+                          pady=14, cursor="hand2", font=("Segoe UI", 13, "bold"))
+        boton.bind("<Enter>", lambda _: boton.configure(bg=color_encima)
+                   if str(boton["state"]) == "normal" else None)
+        boton.bind("<Leave>", lambda _: boton.configure(bg=color))
+        return boton
+
+    def _buscador(self, padre, variable, ayuda, al_escribir):
+        """Cuadro de busqueda con lupa y un texto de ayuda en gris."""
+        caja = tk.Frame(padre, bg="white", highlightthickness=1,
+                        highlightbackground="#b9c6d3", highlightcolor=AZUL)
+        tk.Label(caja, image=self.img["lupa"], bg="white").pack(side="left", padx=(6, 2))
+        entrada = tk.Entry(caja, textvariable=variable, relief="flat", bd=0,
+                           font=("Segoe UI", 10), fg=GRIS)
+        entrada.pack(side="left", fill="x", expand=True, ipady=4, padx=(2, 4))
+        borrar = tk.Label(caja, text="✕", bg="white", fg=GRIS, cursor="hand2",
+                          font=("Segoe UI", 9))
+
+        def mostrar_ayuda():
+            if not variable.get():
+                self._ayudas[str(variable)] = ayuda
+                variable.set(ayuda)
+                entrada.configure(fg="#9aa5b1")
+
+        def quitar_ayuda(_=None):
+            if self._ayudas.pop(str(variable), None) is not None:
+                variable.set("")
+            entrada.configure(fg="black")
+
+        def cambio(*_):
+            if self._texto_buscado(variable):
+                borrar.pack(side="right", padx=(0, 8))
+            else:
+                borrar.pack_forget()
+            al_escribir()
+
+        def limpiar(_=None):
+            self._ayudas.pop(str(variable), None)
+            variable.set("")
+            if self.focus_get() is not entrada:
+                mostrar_ayuda()
+
+        entrada.bind("<FocusIn>", quitar_ayuda)
+        entrada.bind("<FocusOut>", lambda _: mostrar_ayuda())
+        entrada.bind("<Escape>", limpiar)
+        borrar.bind("<Button-1>", limpiar)
+        mostrar_ayuda()
+        variable.trace_add("write", cambio)
+        return caja
+
+    def _texto_buscado(self, variable):
+        ayuda = self._ayudas.get(str(variable))
+        if ayuda is not None:
+            if variable.get() == ayuda:
+                return ""  # lo que se ve es el texto de ayuda, no una busqueda
+            del self._ayudas[str(variable)]
+        return normalizar(variable.get()).strip()
 
     # ---- utilidades
 
@@ -960,13 +1073,32 @@ class App(tk.Tk):
         elif not self.nominas:
             self.arbol.insert("", "end", text="Todavía no hay recibos.", tags=("vacio",))
             self.arbol.insert("", "end", text="Copia aquí el RAR.", tags=("vacio",))
+        # Al lado de cada recibo, el nombre de su persona; asi se puede buscar
+        # un recibo por el nombre ("ramon") ademas de por el archivo.
+        nombres = {solo_digitos(e["cedula"]): e["nombre"] for e in self.empleados}
+        buscado = self._texto_buscado(self.var_buscar_archivo)
+        hallados = 0
         for clave, nombre, _, pdfs in self.nominas:
+            filas = []
+            for pdf in pdfs:
+                quien = next((nombres[n] for n in numeros_del_nombre(pdf) if n in nombres), "")
+                texto = "%s  ·  %s" % (pdf.name, quien) if quien else pdf.name
+                if not buscado or buscado in normalizar(texto):
+                    filas.append(texto)
+            if buscado and not filas:
+                continue
+            hallados += len(filas)
             iid = "n:" + clave
             casilla = "marcado" if clave in self.nominas_marcadas else "libre"
-            self.arbol.insert("", "end", iid=iid, image=self.img[casilla],
-                              text=" %s  (%d)" % (nombre, len(pdfs)), open=iid in abiertas)
-            for pdf in pdfs:
-                self.arbol.insert(iid, "end", text=pdf.name, tags=("archivo",))
+            cuantos = ("%d de %d" % (len(filas), len(pdfs))) if buscado else len(pdfs)
+            self.arbol.insert("", "end", iid=iid, image=self.img[casilla], tags=("nomina",),
+                              text=" %s  (%s)" % (nombre, cuantos),
+                              open=iid in abiertas or bool(buscado))
+            for texto in filas:
+                self.arbol.insert(iid, "end", text=texto, tags=("archivo",))
+        if buscado and not hallados:
+            self.arbol.insert("", "end", text="No se encontró ningún recibo.",
+                              tags=("vacio",))
         self.var_todas.set(bool(self.nominas)
                            and len(self.nominas_marcadas) == len(self.nominas))
 
@@ -1007,10 +1139,12 @@ class App(tk.Tk):
 
     # ---- tabla
 
-    def pintar_fila(self, i, nueva=False):
+    def pintar_fila(self, i, nueva=False, par=False):
         iid = str(i)
         if not nueva and not self.tree.exists(iid):
             return  # esa persona no se esta mostrando
+        if not nueva:
+            par = "par" in self.tree.item(iid, "tags")  # filas alternadas de color
         e = self.empleados[i]
         if not e["pdfs"]:
             casilla, texto, color = "falta", "Sin recibo", "falta"
@@ -1022,7 +1156,8 @@ class App(tk.Tk):
                 texto, color = "Falta el correo", "aviso"
             else:
                 texto, color = "Listo", ""
-        datos = {"image": self.img[casilla], "tags": (color,) if color else (),
+        etiquetas = tuple(x for x in (color, "par" if par else "") if x)
+        datos = {"image": self.img[casilla], "tags": etiquetas,
                  "values": (e["nombre"], e["cedula"], e["correo"], texto)}
         if self.tree.exists(iid):
             self.tree.item(iid, **datos)
@@ -1031,12 +1166,24 @@ class App(tk.Tk):
 
     def pintar_tabla(self):
         # Se ve solo la gente con recibo en las nominas marcadas, salvo que se
-        # pida ver a todos.
+        # pida ver a todos. Si se esta buscando, se busca entre toda la lista.
         seleccion = self.tree.selection()
         self.tree.delete(*self.tree.get_children())
+        buscado = self._texto_buscado(self.var_buscar_persona)
+        vistos = 0
         for i, e in enumerate(self.empleados):
-            if e["pdfs"] or self.var_ver_todos.get():
-                self.pintar_fila(i, nueva=True)
+            if buscado:
+                visible = buscado in normalizar(" ".join((e["nombre"], e["cedula"],
+                                                          e["correo"])))
+            else:
+                visible = e["pdfs"] or self.var_ver_todos.get()
+            if visible:
+                self.pintar_fila(i, nueva=True, par=vistos % 2 == 1)
+                vistos += 1
+        total = len(self.empleados)
+        self.var_total.set("%d persona%s en la lista%s" % (
+            total, "s" * (total != 1),
+            ("  ·  %d encontrada%s" % (vistos, "s" * (vistos != 1))) if buscado else ""))
         for iid in seleccion:
             if self.tree.exists(iid):
                 self.tree.selection_set(iid)
@@ -1285,6 +1432,8 @@ class App(tk.Tk):
                 self.var_cuenta.set("Se envía desde %s" % remitente)
             else:
                 self.var_cuenta.set("⚠ Falta configurar el correo")
+        self.lbl_cuenta.configure(fg="#ffd166" if "Falta" in self.var_cuenta.get()
+                                  else "#cfe0f1")
         if self.btn_gmail is not None:
             self.btn_gmail.configure(text="Cambiar de cuenta" if self.sesion_gmail
                                      else "Iniciar sesión con Gmail")
