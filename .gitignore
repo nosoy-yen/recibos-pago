@@ -22,3 +22,7 @@ prueba-local/
 # Inicio de sesion con Gmail: credenciales de Google y sesion guardada
 client_secret*.json
 sesion_gmail.json
+
+# SumatraPDF (para imprimir) va al lado del .exe, no en el repo
+SumatraPDF*.exe
+SumatraPDF-settings.txt
