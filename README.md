@@ -76,6 +76,18 @@ demás está en **⚙ Configuración**.
 5. **Imprimir** manda los recibos marcados a la impresora que Windows tenga
    puesta por defecto.
 
+### Imprimir
+
+Windows abre los PDF con Edge, y Edge no deja que otro programa le mande PDF a
+imprimir. Por eso el programa imprime con
+[SumatraPDF](https://www.sumatrapdfreader.org) (gratis, código abierto, licencia
+GPLv3), que imprime directo a la impresora por defecto sin abrir ventanas.
+
+Basta con dejar `SumatraPDF.exe` (la versión portátil de 64 bits, renombrada)
+**al lado de** `Recibos.exe`. También sirve si SumatraPDF o Adobe Reader están
+instalados. No va dentro del `.exe` a propósito: pesa 19 MB y haría que el
+programa tarde más en abrir cada vez.
+
 ### La lista de trabajadores
 
 Es el archivo `empleados.csv`, con tres columnas:
